@@ -1,0 +1,27 @@
+# Go build and test output
+/bin/
+*.test
+*.out
+/go.work
+/go.work.sum
+
+# Local caches and scratch files
+/.cache/
+/.gocache/
+/.tmp/
+
+# Editors and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local credentials and environment files
+*.pem
+*.key
+*.pfx
+*.p12
+.env
+.env.*

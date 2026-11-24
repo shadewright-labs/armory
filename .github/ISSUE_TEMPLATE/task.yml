@@ -1,0 +1,74 @@
+name: Task
+description: A unit of work small enough for one pull request.
+labels: ["task"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should be true when this is done?
+    validations:
+      required: true
+  - type: dropdown
+    id: areas
+    attributes:
+      label: Areas
+      multiple: true
+      options: [redact, hygiene, audit, docs, ci, deps]
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Link related issues and pull requests. For an API change, describe the effect on callers.
+    validations:
+      required: true
+  - type: textarea
+    id: adrs
+    attributes:
+      label: ADRs
+      description: Link any architecture decisions this task follows or refer to the parent epic.
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: List the packages or files this task changes and where the work stops.
+    validations:
+      required: true
+  - type: textarea
+    id: decisions
+    attributes:
+      label: Decisions
+      description: List any questions to settle before starting, with the options and your preferred answer.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List the results the pull request must demonstrate and the tests it should add.
+    validations:
+      required: true
+  - type: textarea
+    id: verify
+    attributes:
+      label: How to verify
+      description: List the commands to run. For Go changes, include go test -race ./... when go.mod is present.
+    validations:
+      required: true
+  - type: dropdown
+    id: invariants
+    attributes:
+      label: Invariants touched
+      description: Select the rules this change could affect.
+      multiple: true
+      options:
+        - None
+        - Product independence
+        - Secrets and personal data stay private
+    validations:
+      required: true
+  - type: textarea
+    id: depends
+    attributes:
+      label: Depends on
+      description: Link any issues that must be completed first.

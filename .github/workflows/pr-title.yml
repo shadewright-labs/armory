@@ -1,0 +1,41 @@
+name: PR title
+
+# Use the base-branch workflow so the pull request cannot change its own title check.
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] read-only token, no checkout, never runs pull request code
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  conventional-title:
+    name: Conventional PR title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@2252a14e810aa9b85c2d560bd7070c802206ecf6 # v6.1.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            test
+            docs
+            build
+            ci
+            chore
+            revert
+          scopes: |
+            redact
+            hygiene
+            audit
+            docs
+            ci
+            deps
+          requireScope: false
+          subjectPattern: ^[a-z].*[^.]$
+          subjectPatternError: |
+            The summary "{subject}" must start with a lower-case letter and omit the final full stop.
