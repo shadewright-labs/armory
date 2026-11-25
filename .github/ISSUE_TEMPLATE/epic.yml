@@ -1,0 +1,38 @@
+name: Epic
+description: One outcome delivered by a set of related tasks.
+labels: ["epic"]
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: What can a caller do when this work is done?
+    validations:
+      required: true
+  - type: dropdown
+    id: areas
+    attributes:
+      label: Areas
+      multiple: true
+      options: [redact, hygiene, audit, docs, ci, deps]
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Divide the work into tasks that can ship and be tested on their own. List them in priority order.
+    validations:
+      required: true
+  - type: textarea
+    id: adrs
+    attributes:
+      label: ADRs
+      description: Link any relevant architecture decisions and list decisions still to make.
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: What result will show the epic is complete?
+    validations:
+      required: true
