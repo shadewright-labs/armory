@@ -100,10 +100,9 @@ func TestParseStreamFixtures(t *testing.T) {
 			want: Usage{Family: Anthropic, InputTokens: 25, OutputTokens: 1}},
 		{file: "chat-stream.sse", family: OpenAIChat, want: Usage{Family: OpenAIChat, InputTokens: 1200,
 			OutputTokens: 42, CachedPromptTokens: 1024}},
-		// Usage on every chunk, growing: the second block differs from the first, a contradiction of the one
-		// usage chunk contract. The parse stops there with the latest block.
-		{file: "chat-stream-twice.sse", family: OpenAIChat, wantErr: ErrInconsistent, want: Usage{Family: OpenAIChat,
-			InputTokens: 300, OutputTokens: 2}},
+		// Cumulative usage on every chunk, growing, as some compatible servers send it: the last block.
+		{file: "chat-stream-twice.sse", family: OpenAIChat, want: Usage{Family: OpenAIChat, InputTokens: 300,
+			OutputTokens: 7}},
 		{file: "chat-stream-zero.sse", family: OpenAIChat, want: Usage{Family: OpenAIChat}},
 		{file: "chat-stream-no-usage.sse", family: OpenAIChat, wantErr: ErrNoUsage},
 		{file: "chat-stream-truncated.sse", family: OpenAIChat, wantErr: ErrTruncated},

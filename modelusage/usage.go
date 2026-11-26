@@ -175,7 +175,7 @@ var (
 	ErrTruncated = errors.New("modelusage: the stream ended before its final event")
 	// ErrInconsistent is returned inside a *PartialError for a stream that contradicts itself before its
 	// final event: an Anthropic count lower than the value an earlier block reported, or a chat completions
-	// usage block that differs from an earlier one. The Usage then holds the latest values.
+	// usage block with any count lower than in the block before. The Usage then holds the latest values.
 	ErrInconsistent = errors.New("modelusage: the stream reported usage that contradicts its earlier usage")
 )
 

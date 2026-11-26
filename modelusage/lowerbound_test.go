@@ -16,8 +16,9 @@ import (
 //
 //   - unless the error matches ErrInconsistent, every count of the result is at least the same count of U:
 //     an Anthropic count only takes a later value that is not lower (a lower one is the contradiction), a
-//     chat completions block is replaced only by an equal one, and the Responses usage comes once, in the
-//     final event, so U is zero before it. TotalInputTokens and TotalTokens, sums of counts, follow;
+//     chat completions block is replaced only by one with no lower count (growing blocks are consistent), and
+//     the Responses usage comes once, in the final event, so U is zero before it. TotalInputTokens and
+//     TotalTokens, sums of counts, follow;
 //     UncachedInputTokens, a difference, does not, and is not checked;
 //   - with ErrInconsistent, the error is a *PartialError, since a contradiction can only come before the final
 //     event;
@@ -36,6 +37,7 @@ var cleanStreams = []struct {
 	{"anthropic-stream-delta-input.sse", Anthropic},
 	{"anthropic-stream-zero.sse", Anthropic},
 	{"chat-stream.sse", OpenAIChat},
+	{"chat-stream-twice.sse", OpenAIChat},
 	{"chat-stream-zero.sse", OpenAIChat},
 	{"responses-stream.sse", OpenAIResponses},
 	{"responses-stream-cache.sse", OpenAIResponses},

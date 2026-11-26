@@ -26,12 +26,14 @@ import (
 //     contradiction: the counts take the new values and the parse stops with ErrInconsistent. The final event
 //     is message_stop. After it, ping events and events of types the parser does not know are allowed, since
 //     the provider may send ping at any point and add event types; any other event is a trailing problem.
-//   - OpenAIChat: the contract is one chunk with a non-null usage field (stream_options.include_usage), the
-//     last before data: [DONE]. When several chunks carry usage, the latest complete block is the usage, as a
-//     whole and never mixed count by count, and a block that differs from the one before is a contradiction:
-//     the usage becomes the new block and the parse stops with ErrInconsistent. The final event is data whose
-//     whole text is [DONE]. Chat chunks do not use the type member, so it is not read. A chunk with an error
-//     member ends the stream as truncated, after its usage, if any, is taken. Nothing is allowed after [DONE].
+//   - OpenAIChat: OpenAI sends one chunk with a non-null usage field (stream_options.include_usage), the last
+//     before data: [DONE]; some compatible servers send cumulative usage on every chunk. The latest complete
+//     block is the usage, as a whole and never mixed count by count. A block with no count lower than in the
+//     block before is consistent, so growing blocks are a normal stream; a block with any lower count is a
+//     contradiction: the usage becomes the new block and the parse stops with ErrInconsistent. The final
+//     event is data whose whole text is [DONE]. Chat chunks do not use the type member, so it is not read. A
+//     chunk with an error member ends the stream as truncated, after its usage, if any, is taken. Nothing is
+//     allowed after [DONE].
 //   - OpenAIResponses: the usage is response.usage of the final event, one of response.completed,
 //     response.incomplete or response.failed, and nothing else. After it, one data: [DONE], which servers that
 //     copy chat completions send, and events other than a final or error event are allowed.
@@ -449,9 +451,9 @@ func (p *streamParser) chatEvent(data []byte) {
 			p.report(err)
 			return
 		}
-		changed := p.seen && u != p.last
+		lower := p.seen && anyLower(u, p.last)
 		p.last, p.seen = u, true
-		if changed {
+		if lower {
 			p.report(ErrInconsistent)
 			return
 		}
@@ -498,6 +500,24 @@ func (p *streamParser) responsesEvent(data []byte) {
 		}
 		p.report(ErrTruncated)
 	}
+}
+
+// anyLower reports whether any count of next is lower than the same count of prev.
+func anyLower(next, prev Usage) bool {
+	a := [...]int64{next.InputTokens, next.OutputTokens, next.CacheCreationInputTokens,
+		next.CacheCreation5mInputTokens, next.CacheCreation1hInputTokens, next.CacheReadInputTokens,
+		next.CachedPromptTokens, next.CacheWritePromptTokens, next.CacheWrite30mPromptTokens,
+		next.CacheWrite12hPromptTokens, next.ReasoningTokens}
+	b := [...]int64{prev.InputTokens, prev.OutputTokens, prev.CacheCreationInputTokens,
+		prev.CacheCreation5mInputTokens, prev.CacheCreation1hInputTokens, prev.CacheReadInputTokens,
+		prev.CachedPromptTokens, prev.CacheWritePromptTokens, prev.CacheWrite30mPromptTokens,
+		prev.CacheWrite12hPromptTokens, prev.ReasoningTokens}
+	for i := range a {
+		if a[i] < b[i] {
+			return true
+		}
+	}
+	return false
 }
 
 // readError is a reader's error kept as the cause of a result. It has no Unwrap method, so errors.As never

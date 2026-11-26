@@ -56,10 +56,11 @@
 // exact and is reported as a *TrailingError.
 //
 // Counts accumulate by the rule of each family. Anthropic: each count takes the latest value a block reports,
-// and a lower value than before is a contradiction. Chat completions: one usage chunk is the contract; with
-// several, the latest complete block wins as a whole, and a block that differs from the one before is a
-// contradiction. Responses: only the block of the final event counts. A contradiction stops the parse with
-// [ErrInconsistent] inside a *PartialError and the latest values.
+// and only a value lower than before is a contradiction. Chat completions: the latest complete block wins as
+// a whole; a block with no count lower than in the block before is consistent (servers that send cumulative
+// usage on every chunk send growing blocks), and only a block with any lower count is a contradiction.
+// Responses: only the block of the final event counts. A contradiction stops the parse with [ErrInconsistent]
+// inside a *PartialError and the latest values.
 //
 // What a partial result bounds: unless the error matches ErrInconsistent, every count, and so TotalInputTokens
 // and TotalTokens, is at least what ParseStream returns for any shorter part of the same stream cut after an

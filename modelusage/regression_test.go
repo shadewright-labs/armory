@@ -92,9 +92,10 @@ var regressionCases = []struct {
 		total: 11, class: classFinal},
 	// One usage chunk and no end: partial, and its uncached part is 9 of that block only.
 	{name: "uncached prefix", family: OpenAIChat, input: rcCached0, total: 11, class: classPartial, cause: ErrTruncated},
-	// A second, different chunk contradicts the one chunk contract: the latest block, with ErrInconsistent.
+	// A second chunk whose cached count grew is consistent: the latest block, still partial without [DONE].
+	// Its uncached part fell from 9 to 2, which is why UncachedInputTokens is no lower bound.
 	{name: "uncached extended", family: OpenAIChat, input: rcCached0 + rcCached7, total: 11, class: classPartial,
-		cause: ErrInconsistent},
+		cause: ErrTruncated},
 	// Lower later counts used to be merged by maximum into 17, a total no block reported.
 	{name: "lower anthropic counts", family: Anthropic, input: rcAnthropicStart +
 		"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":1,\"output_tokens\":8}}\n\n" + rcAnthropicStop,
@@ -102,12 +103,22 @@ var regressionCases = []struct {
 	{name: "differing chat blocks", family: OpenAIChat, input: rcChatUsage +
 		"data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":8}}\n\n" + rcChatDone,
 		total: 9, class: classPartial, cause: ErrInconsistent},
+	// Cumulative usage on every chunk, as continuous usage stats send it: growing blocks, then [DONE].
+	{name: "continuous usage chat stream", family: OpenAIChat,
+		input: "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":0}}\n\n" +
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":1," +
+			"\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n" +
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":3," +
+			"\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n" + rcChatDone,
+		total: 12, class: classFinal},
+	{name: "chat block with one lower count", family: OpenAIChat, input: rcCached7 + rcCached0 + rcChatDone,
+		total: 11, class: classPartial, cause: ErrInconsistent},
 	{name: "repeated equal chat blocks", family: OpenAIChat, input: rcChatUsage + rcChatUsage + rcChatDone,
 		total: 11, class: classFinal},
-	// The usage of a chunk with an error member is taken before the error ends the stream.
+	// The usage of a chunk with an error member is taken, grown, before the error ends the stream.
 	{name: "error chunk with updated usage", family: OpenAIChat, input: rcChatUsage +
 		"data: {\"error\":{},\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":5}}\n\n",
-		total: 14, class: classPartial, cause: ErrInconsistent},
+		total: 14, class: classPartial, cause: ErrTruncated},
 	{name: "error chunk with the only usage", family: OpenAIChat,
 		input: "data: {\"error\":{\"message\":\"stopped\"},\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2}}\n\n",
 		total: 11, class: classPartial, cause: ErrTruncated},
