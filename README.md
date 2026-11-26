@@ -38,6 +38,40 @@
 
 These are the parts of the [six shared security laws](https://shadewrightlabs.com/#security-laws) that more than one product needs. Each product keeps its own policy, approvals, tokens and model clients.
 
+## Use it
+
+Import path: `github.com/shadewright-labs/armory/modelusage`.
+
+There is no tagged version yet, so `go get` needs `@main` or a commit hash, and the API can change until v1.0.0:
+
+```bash
+go get github.com/shadewright-labs/armory@main
+```
+
+```go
+const reply = `{
+	"id": "msg_01",
+	"type": "message",
+	"role": "assistant",
+	"usage": {
+		"input_tokens": 50,
+		"cache_creation_input_tokens": 240,
+		"cache_read_input_tokens": 1800,
+		"output_tokens": 120
+	}
+}`
+lim := modelusage.Limits{MaxBytes: 1 << 20, MaxTokens: 1 << 30}
+u, err := modelusage.ParseJSON(modelusage.Anthropic, strings.NewReader(reply), lim)
+if err != nil {
+	fmt.Println("error:", err)
+	return
+}
+fmt.Printf("prompt=%d uncached=%d output=%d total=%d\n",
+	u.TotalInputTokens(), u.UncachedInputTokens(), u.OutputTokens, u.TotalTokens())
+```
+
+More runnable examples are in [modelusage/example_test.go](modelusage/example_test.go). They will also show on [pkg.go.dev](https://pkg.go.dev/github.com/shadewright-labs/armory/modelusage) once the first version is tagged.
+
 ## Repositories
 
 | Repository | Contents |

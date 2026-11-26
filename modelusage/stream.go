@@ -22,42 +22,42 @@ import (
 //
 // Which usage counts, per family:
 //
-//   - Anthropic: message_start carries the first usage block in message.usage and each message_delta a
+//   - [Anthropic]: message_start carries the first usage block in message.usage and each message_delta a
 //     cumulative one. Each count takes the latest value present in a block, as the vendor's own accumulator
 //     does; a count absent or null keeps its earlier value. A count lower than its earlier value is a
-//     contradiction: the counts take the new values and the parse stops with ErrInconsistent. The final event
+//     contradiction: the counts take the new values and the parse stops with [ErrInconsistent]. The final event
 //     is message_stop. After it, ping events and events of types the parser does not know are allowed, since
 //     the provider may send ping at any point and add event types; any other event is a trailing problem.
-//   - OpenAIChat: OpenAI sends one chunk with a non-null usage field (stream_options.include_usage), the last
-//     before data: [DONE]; some compatible servers send cumulative usage on every chunk. The latest complete
-//     block is the usage, as a whole and never mixed count by count. A block with no count lower than in the
-//     block before is consistent, so growing blocks are a normal stream; a block with any lower count is a
-//     contradiction: the usage becomes the new block and the parse stops with ErrInconsistent. The final
+//   - [OpenAIChat]: OpenAI sends one chunk with a non-null usage field (stream_options.include_usage), the
+//     last before data: [DONE]; some compatible servers send cumulative usage on every chunk. The latest
+//     complete block is the usage, as a whole and never mixed count by count. A block with no count lower than
+//     in the block before is consistent, so growing blocks are a normal stream; a block with any lower count
+//     is a contradiction: the usage becomes the new block and the parse stops with ErrInconsistent. The final
 //     event is data whose whole text is [DONE]. Chat chunks do not use the type member, so it is not read. A
 //     chunk with an error member ends the stream as truncated, after its usage, if any, is taken. Nothing is
 //     allowed after [DONE].
-//   - OpenAIResponses: the usage is response.usage of the final event, one of response.completed,
+//   - [OpenAIResponses]: the usage is response.usage of the final event, one of response.completed,
 //     response.incomplete or response.failed, and nothing else. After it, one data: [DONE], which servers that
 //     copy chat completions send, and events other than a final or error event are allowed.
 //
-// The parse stops at the first problem. The error then tells how to use the Usage:
+// The parse stops at the first problem. The error then tells how to use the [Usage]:
 //
 //   - nil: the stream reached its final event and nothing wrong followed. The Usage is final.
-//   - *TrailingError: the final event was read, then a problem (a second final event or [DONE], an event that
-//     would change the counts, a malformed or unfinished event, a byte limit, a reader error, an error event).
-//     The Usage is exactly the one at the final event, the same as with a nil error.
-//   - *PartialError: at least one usage block with a count was accepted, then the stream ended or broke
-//     before its final event. The Usage is the usage so far, under the rules above. See PartialError for what
-//     it bounds.
-//   - any other error, with a zero Usage: no usage block with a count was accepted. ErrInvalidLimits, a
-//     *LimitError matching ErrTooLarge or ErrLineTooLong, ErrMalformed, ErrNoUsage, ErrOutOfRange,
-//     ErrTruncated, or the reader's error.
+//   - [*TrailingError]: the final event was read, then a problem (a second final event or [DONE], an event
+//     that would change the counts, a malformed or unfinished event, a byte limit, a reader error, an error
+//     event). The Usage is exactly the one at the final event, the same as with a nil error.
+//   - [*PartialError]: at least one usage block with a count was accepted, then the stream ended or broke
+//     before its final event. The Usage is the usage so far, under the rules above. See [PartialError] for
+//     what it bounds.
+//   - any other error, with a zero Usage: no usage block with a count was accepted. [ErrInvalidLimits], a
+//     [*LimitError] matching [ErrTooLarge] or [ErrLineTooLong], [ErrMalformed], [ErrNoUsage], [ErrOutOfRange],
+//     [ErrTruncated], or the reader's error.
 //
 // ParseStream returns *TrailingError and *PartialError themselves, never wrapped, and their cause never holds
-// either type: a reader's error is kept as an opaque cause that errors.Is matches (the reader's error value and
-// its chain: io.ErrUnexpectedEOF, a context error, a sentinel of the caller's) but errors.As does not unwrap.
-// A reader error before the final event also matches ErrTruncated. Only io.EOF itself ends the input; see the
-// package documentation for other reader errors and empty reads.
+// either type: a reader's error is kept as an opaque cause that [errors.Is] matches (the reader's error value
+// and its chain: [io.ErrUnexpectedEOF], a context error, a sentinel of the caller's) but [errors.As] does not
+// unwrap. A reader error before the final event also matches ErrTruncated. Only [io.EOF] itself ends the
+// input; see the package documentation for other reader errors and empty reads.
 func ParseStream(f Family, r io.Reader, lim Limits) (Usage, error) {
 	if err := lim.check(f, true); err != nil {
 		return Usage{}, err
