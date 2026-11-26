@@ -131,10 +131,41 @@ var (
 	// ErrOutOfRange is returned for a count that is negative, not an integer, above Limits.MaxTokens, or
 	// larger than the count it is a part of.
 	ErrOutOfRange = errors.New("modelusage: a usage count is out of range")
-	// ErrTruncated is returned for a stream that ended before its final event. ParseStream returns it with
-	// the usage read so far, which can be lower than what the provider bills.
+	// ErrTruncated matches a *TruncatedError: a stream that ended, failed or reported an error before its
+	// final event.
 	ErrTruncated = errors.New("modelusage: the stream ended before its final event")
 )
+
+// TruncatedError is returned by ParseStream for a stream that ended, failed or carried an error event before
+// its final event. It matches ErrTruncated with errors.Is, and unwraps to the reader's error when the reader
+// failed.
+//
+// The Usage returned with it is never final. When Partial is true it holds the counts of the usage blocks
+// read before the stream stopped, which can be lower than what the provider bills; when Partial is false it
+// is zero.
+type TruncatedError struct {
+	// Partial is set when the Usage returned with the error holds the counts read so far.
+	Partial bool
+	// Err is the reader's error, or nil when the stream ended or carried an error event.
+	Err error
+}
+
+func (e *TruncatedError) Error() string {
+	msg := "modelusage: the stream ended before its final event"
+	if e.Partial {
+		msg += ", with partial usage"
+	}
+	if e.Err != nil {
+		return msg + ": " + e.Err.Error()
+	}
+	return msg
+}
+
+// Is reports whether target is ErrTruncated.
+func (e *TruncatedError) Is(target error) bool { return target == ErrTruncated }
+
+// Unwrap returns the reader's error, or nil.
+func (e *TruncatedError) Unwrap() error { return e.Err }
 
 // LimitError is returned when a reply or a stream line passes its byte limit. It matches ErrTooLarge or
 // ErrLineTooLong with errors.Is.

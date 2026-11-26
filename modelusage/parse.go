@@ -68,13 +68,17 @@ func ParseJSON(f Family, r io.Reader, lim Limits) (Usage, error) {
 //     response.completed, response.incomplete or response.failed; usage in earlier events is ignored. A
 //     second final event is ErrMalformed, because the counts of two responses cannot be told apart.
 //
-// A stream that ends before its final event, or that carries an error event (Anthropic and Responses
-// type error, or a chat chunk with an error field), is ErrTruncated, returned with the usage read so far:
-// the counts of the last complete usage block, which can be lower than what the provider bills. An event
-// cut off by the end of the stream counts as missing, not malformed.
+// The Usage is final only when the error is nil. A stream that ends before its final event, whose reader
+// fails after at least one usage block, or that carries an error event (Anthropic and Responses type error,
+// or a chat chunk with an error field) returns a *TruncatedError, which matches ErrTruncated and wraps the
+// reader's error if there was one. With it comes the usage read so far, the counts of the last complete
+// usage block, which can be lower than what the provider bills: TruncatedError.Partial tells whether there
+// is any. An event cut off by the end of the stream counts as missing, not malformed. A reader error after
+// the final event does not change the result, since the counts are already final.
 //
 // Other errors: ErrInvalidLimits, a *LimitError matching ErrTooLarge or ErrLineTooLong, ErrMalformed,
-// ErrNoUsage, ErrOutOfRange, or the reader's own error wrapped. With these the Usage is zero.
+// ErrNoUsage, ErrOutOfRange, or the reader's own error wrapped when it fails before any usage block. With
+// these the Usage is zero.
 func ParseStream(f Family, r io.Reader, lim Limits) (Usage, error) {
 	if err := lim.check(f, true); err != nil {
 		return Usage{}, err
@@ -123,6 +127,13 @@ func ParseStream(f Family, r io.Reader, lim Limits) (Usage, error) {
 	if err := sc.Err(); err != nil {
 		if errors.Is(err, bufio.ErrTooLong) {
 			return Usage{}, &LimitError{Line: true, Limit: int64(lim.MaxLineBytes)}
+		}
+		switch {
+		case st.done:
+			// The final event was read, so the counts are final: a cut after it loses nothing.
+			return st.finish()
+		case st.seen:
+			return st.truncated(err)
 		}
 		return Usage{}, fmt.Errorf("modelusage: reading the stream: %w", err)
 	}
@@ -297,12 +308,19 @@ func (s *streamState) responsesEvent(data []byte) error {
 	return nil
 }
 
-// fail returns err with a zero Usage, or with the usage read so far when err is ErrTruncated.
+// fail returns err with a zero Usage, or a *TruncatedError with the usage read so far when err is
+// ErrTruncated.
 func (s *streamState) fail(err error) (Usage, error) {
 	if !errors.Is(err, ErrTruncated) {
 		return Usage{}, err
 	}
-	return s.partial(), ErrTruncated
+	return s.truncated(nil)
+}
+
+// truncated returns the usage read so far with a *TruncatedError that wraps readErr, which may be nil.
+func (s *streamState) truncated(readErr error) (Usage, error) {
+	u := s.partial()
+	return u, &TruncatedError{Partial: u != (Usage{}), Err: readErr}
 }
 
 // partial is the usage read so far, or zero when none was read or it breaks a rule of Usage.

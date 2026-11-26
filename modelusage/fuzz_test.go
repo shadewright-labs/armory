@@ -54,6 +54,10 @@ func checkResult(t *testing.T, cr *countingReader, u Usage, err error, fam Famil
 	if err != nil && !errors.Is(err, ErrTruncated) && u != (Usage{}) {
 		t.Fatalf("usage %+v returned with %v", u, err)
 	}
+	var te *TruncatedError
+	if errors.As(err, &te) && te.Partial != (u != Usage{}) {
+		t.Fatalf("usage %+v returned with Partial %v", u, te.Partial)
+	}
 	if u == (Usage{}) {
 		return
 	}

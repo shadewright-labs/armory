@@ -334,6 +334,62 @@ func TestReaderErrorIsWrapped(t *testing.T) {
 	}
 }
 
+func TestStreamReaderError(t *testing.T) {
+	const (
+		start = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n"
+		delta = "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n"
+		stop  = "data: {\"type\":\"message_stop\"}\n\n"
+		chat  = "data: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n"
+	)
+	cut := io.ErrUnexpectedEOF
+	tests := []struct {
+		name      string
+		family    Family
+		body      string
+		readErr   error
+		want      Usage
+		truncated bool
+		partial   bool
+	}{
+		{name: "anthropic cut after usage", family: Anthropic, body: start + delta, readErr: cut,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}, truncated: true, partial: true},
+		{name: "anthropic cut inside an event", family: Anthropic, body: start + "data: {\"type\":\"mess", readErr: cut,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 1}, truncated: true, partial: true},
+		{name: "chat cut before done", family: OpenAIChat, body: chat, readErr: cut,
+			want: Usage{Family: OpenAIChat, InputTokens: 7, OutputTokens: 2}, truncated: true, partial: true},
+		{name: "cut before any usage", family: Anthropic, body: "data: {\"type\":\"ping\"}\n\n", readErr: cut},
+		{name: "end before any usage", family: Anthropic, body: "data: {\"type\":\"ping\"}\n\n", readErr: io.EOF,
+			truncated: true},
+		{name: "end after usage", family: Anthropic, body: start, readErr: io.EOF,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 1}, truncated: true, partial: true},
+		// The final event was read, so the counts are final whatever the reader reports after it.
+		{name: "cut after the final event", family: Anthropic, body: start + delta + stop, readErr: cut,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseStream(tt.family, &errReader{data: tt.body, err: tt.readErr}, testLimits)
+			if got != tt.want {
+				t.Errorf("usage = %+v, want %+v", got, tt.want)
+			}
+			if errors.Is(err, ErrTruncated) != tt.truncated {
+				t.Errorf("err = %v, ErrTruncated %v, want %v", err, errors.Is(err, ErrTruncated), tt.truncated)
+			}
+			final := tt.want != (Usage{}) && !tt.truncated
+			if final != (err == nil) {
+				t.Errorf("err = %v, want an error: %v", err, !final)
+			}
+			if tt.readErr != io.EOF && !final && !errors.Is(err, tt.readErr) {
+				t.Errorf("err = %v, want it to wrap the reader's error", err)
+			}
+			var te *TruncatedError
+			if errors.As(err, &te) != tt.truncated || (te != nil && te.Partial != tt.partial) {
+				t.Errorf("err = %#v, want a TruncatedError %v with Partial %v", err, tt.truncated, tt.partial)
+			}
+		})
+	}
+}
+
 // errReadPastLimit ends a parse that asked a limitReader for more than it may read.
 var errReadPastLimit = errors.New("read past the limit")
 

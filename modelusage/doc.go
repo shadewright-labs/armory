@@ -12,6 +12,11 @@
 // inconsistent with the other counts (more cached tokens than input tokens, for example) is
 // [ErrOutOfRange], never a number. Error text is fixed and never quotes the reply.
 //
+// A Usage is final only when the error is nil. ParseJSON returns a zero Usage with every error. ParseStream
+// returns a non-zero Usage with an error in one case only: a [*TruncatedError] whose Partial field is set,
+// for a stream that stopped before its final event. Those counts are what the stream carried so far and can
+// be lower than what the provider bills; never treat them as the final usage.
+//
 // The package does not make HTTP requests, price tokens, know model names or log anything. Choosing the
 // family from a request path or a provider setting, and what to charge when the usage cannot be read, stay
 // with the caller.
