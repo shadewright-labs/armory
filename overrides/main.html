@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{#- Link previews: Open Graph and Twitter tags with the local brand image (no third-party social cards service). -#}
+{% block extrahead %}
+  {% set am_title = page.meta.title if page.meta and page.meta.title else (page.title | striptags if page and page.title and not page.is_homepage else config.site_name) %}
+  {% set am_desc = page.meta.description if page.meta and page.meta.description else config.site_description %}
+  {% set am_image = config.site_url ~ "assets/brand/shadewright-labs-dark.svg" %}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:title" content="{{ am_title | e }}">
+  <meta property="og:description" content="{{ am_desc | e }}">
+  <meta property="og:image" content="{{ am_image }}">
+  <meta property="og:image:width" content="1236">
+  <meta property="og:image:height" content="430">
+  <meta property="og:image:alt" content="Armory: shared Go building blocks for Shadewright Labs products">
+  {% if page.canonical_url %}<meta property="og:url" content="{{ page.canonical_url }}">{% endif %}
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ am_title | e }}">
+  <meta name="twitter:description" content="{{ am_desc | e }}">
+  <meta name="twitter:image" content="{{ am_image }}">
+{% endblock %}

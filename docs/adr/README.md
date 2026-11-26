@@ -1,6 +1,6 @@
 # Architecture decision records
 
-A decision that sets a package's boundary, its API contract, a security rule or a new dependency is recorded here before code depends on it. A change that weakens an invariant of [AGENTS.md](../../AGENTS.md) needs an ADR first.
+A decision that sets a package's boundary, its API contract, a security rule or a new dependency is recorded here before code depends on it. A change that weakens an invariant of [AGENTS.md](https://github.com/shadewright-labs/armory/blob/main/AGENTS.md) needs an ADR first.
 
 - Template: [0000-template.md](0000-template.md)
 - File name: `NNNN-short-title.md`, numbered in the order the pull requests open. Take the next free number on `main` and in the open pull requests.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The predicate of the `ci-ok` job of .github/workflows/ci.yml. Reads the `needs` context as JSON from $NEEDS and
 # the event name from $EVENT_NAME, prints each job's result, and exits 0 only when:
-#   - the `changes` job succeeded and each of its outputs go and codeql is exactly "true" or "false";
+#   - the `changes` job succeeded and each of its outputs go, docs and codeql is exactly "true" or "false";
 #   - every job listed below is present in $NEEDS (a job missing from the result fails the check);
 #   - every job the decision or the event selects, and every job that always runs, succeeded;
 #   - a job counts as deselected only when the decision said "false" for its group or the event excludes it
@@ -21,7 +21,7 @@ printf '%s\n' "${NEEDS}" | jq -e --arg event "${event}" '
   def out(k): .changes.outputs[k];
   def bool(k): out(k) == "true" or out(k) == "false";
   . as $root
-  | (["go","codeql"] | all(. as $k | $root | bool($k))) as $valid
+  | (["go","docs","codeql"] | all(. as $k | $root | bool($k))) as $valid
   | ($root.changes.result == "success") as $changes_ok
   # job name -> whether the decision and the event select it
   | {
@@ -29,6 +29,7 @@ printf '%s\n' "${NEEDS}" | jq -e --arg event "${event}" '
       test:            (out("go") == "true"),
       govulncheck:     (out("go") == "true"),
       gosec:           (out("go") == "true"),
+      "docs-check":    (out("docs") == "true"),
       codeql:          ($event == "pull_request" and out("codeql") == "true"),
       "workflow-lint": true,
       "secret-scan":   true,
