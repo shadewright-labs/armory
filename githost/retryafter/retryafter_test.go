@@ -11,6 +11,8 @@ const (
 	hRetry     = "Retry-After"
 	hRemaining = "X-RateLimit-Remaining"
 	hReset     = "X-RateLimit-Reset"
+	// unusable is a header value that is neither a number nor a date.
+	unusable = "soon"
 )
 
 var now = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
@@ -28,7 +30,7 @@ func TestParse(t *testing.T) {
 		"601":                 maxDelay,
 		"99999999999999":      maxDelay,
 		"9223372036854775807": maxDelay,
-		"soon":                0,
+		unusable:              0,
 		now.Add(20 * time.Second).Format(http.TimeFormat): 20 * time.Second,
 		now.Add(time.Hour).Format(http.TimeFormat):        maxDelay,
 		now.Add(-time.Minute).Format(http.TimeFormat):     0,
@@ -64,8 +66,19 @@ func TestHeader(t *testing.T) {
 		{"quota reset huge", []string{hRemaining, "0", hReset, "9223372036854775807"},
 			time.Hour},
 		{"quota reset in the past", []string{hRemaining, "0", hReset, reset(-time.Minute)}, 0},
-		{"quota reset not a number", []string{hRemaining, "0", hReset, "soon"}, 0},
+		{"quota reset not a number", []string{hRemaining, "0", hReset, unusable}, 0},
 		{"quota left", []string{hRemaining, "10", hReset, reset(time.Minute)}, 0},
+		{"retry-after zero wins over reset", []string{hRetry, "0", hRemaining, "0",
+			hReset, reset(time.Minute)}, 0},
+		{"retry-after unusable, reset used", []string{hRetry, unusable, hRemaining, "0",
+			hReset, reset(45 * time.Second)}, 45 * time.Second},
+		{"retry-after negative, reset used", []string{hRetry, "-5", hRemaining, "0",
+			hReset, reset(45 * time.Second)}, 45 * time.Second},
+		{"retry-after usable, reset unusable", []string{hRetry, "3", hRemaining, "0", hReset, unusable},
+			3 * time.Second},
+		{"both unusable", []string{hRetry, unusable, hRemaining, "0", hReset, "later"}, 0},
+		{"retry-after unusable, quota left", []string{hRetry, unusable, hRemaining, "10",
+			hReset, reset(time.Minute)}, 0},
 	}
 	for _, c := range cases {
 		h := http.Header{}
