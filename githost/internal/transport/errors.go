@@ -144,3 +144,45 @@ func StatusError(op string, status int) error {
 	}
 	return &githost.Error{Op: op, Status: status, Kind: kind}
 }
+
+// maxOp bounds the length of an operation label.
+const maxOp = 64
+
+// validOp reports whether op is a label errors may print: 1 to 64 ASCII letters, digits, ".", "_" and
+// "-".
+func validOp(op string) bool {
+	return op != "" && len(op) <= maxOp &&
+		allIn(op, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+}
+
+// validFieldName reports whether k is an HTTP field name (RFC 9110, section 5.1): one or more token
+// characters.
+func validFieldName(k string) bool {
+	return k != "" && allIn(k, "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+}
+
+// validFieldValue reports whether v is a field value Go sends: no control character other than a tab,
+// and no DEL. It is the rule of net/http's own check, so a value that passes is not refused below Do.
+func validFieldValue(v string) bool {
+	for i := range len(v) {
+		if b := v[i]; (b < ' ' && b != '\t') || b == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// validHeader reports whether every name and value of h is one Go sends.
+func validHeader(h http.Header) bool {
+	for k, vs := range h {
+		if !validFieldName(k) {
+			return false
+		}
+		for _, v := range vs {
+			if !validFieldValue(v) {
+				return false
+			}
+		}
+	}
+	return true
+}

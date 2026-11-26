@@ -125,6 +125,27 @@ func TestTemplateMatchesPath(t *testing.T) {
 		{"/x/y", "/x/{a}?q", false},
 		{"/x/y", "/x/{a} ", false},
 		{"/x/", "/x/", false},
+		// The template is matched against the path the host routes: no encoded slash or backslash, no
+		// dot segment, and the path as sent, byte for byte.
+		{"/repos/o/n/things/a%2Fb", template, false},
+		{"/repos/o/n/things/a%2fb", template, false},
+		{"/repos/o/n/things/a%5Cb", template, false},
+		{"/repos/o/n/things/..", template, false},
+		{"/repos/o/n/things/.", template, false},
+		{"/repos/o/n/things/%2e%2e", template, false},
+		{"/repos/o/n/things/%2E", template, false},
+		{"/repos/o/n/things/.%2e", template, false},
+		{"/repos/o/n/things/%zz", template, false},
+		{"/repos/o/n/things/a b", template, false},
+		{"/repos/o/../things/x", template, false},
+		{"/repos/o/n/contents/a/../b", tmplContents, false},
+		{"/repos/o/n/contents/a/./b", tmplContents, false},
+		{"/repos/o/n/contents/a%2Fb", tmplContents, false},
+		{"/repos/o/n/contents/..", tmplContents, false},
+		{"/a/../b", "/a/../b", false},
+		{"/a/./b", "/a/./b", false},
+		{"/repos/o/n/things/a%20b", template, true},
+		{"/repos/o/n/things/..a", template, true},
 	}
 	for _, c := range cases {
 		r := get()
@@ -134,8 +155,8 @@ func TestTemplateMatchesPath(t *testing.T) {
 			t.Errorf("Do(%q, %q) = %v, want ok %v", c.path, c.tmpl, err, c.ok)
 		}
 	}
-	if n := h.creds.Load(); n != 4 {
-		t.Errorf("credential asked %d times, want 4", n)
+	if n := h.creds.Load(); n != 6 {
+		t.Errorf("credential asked %d times, want 6", n)
 	}
 }
 
@@ -195,6 +216,18 @@ func TestNextPage(t *testing.T) {
 		{name: "userinfo", links: []string{"<https://" + apiHost + at + `evil.test/x?page=2>; rel="next"`},
 			wantErr: githost.ErrUntrustedAnswer},
 		{name: "no brackets", links: []string{`https://api.example.test/x?page=2; rel="next"`},
+			wantErr: githost.ErrUntrustedAnswer},
+		{name: "comma in the URL", links: []string{`<https://api.example.test/a,b?page=2>; rel="next"`},
+			wantPage: "2"},
+		{name: "comma in a quoted title", links: []string{`<https://api.example.test/x?page=2>; rel="next"; title="a, b"`},
+			wantPage: "2"},
+		{name: "rel inside a quoted title", links: []string{
+			`<https://api.example.test/x?page=1>; rel="prev"; title="x; rel=next, <https://api.example.test/x?page=2>"`},
+		},
+		{name: "escaped quote in a title", links: []string{
+			`<https://api.example.test/x?page=1>; title="a\", rel=next"; rel="prev"`, link("2")},
+			wantPage: "2"},
+		{name: "unclosed bracket", links: []string{`<https://api.example.test/x?page=2; rel="next"`},
 			wantErr: githost.ErrUntrustedAnswer},
 		{name: "bad current page", current: "x", links: []string{link("2")}, wantErr: githost.ErrRejected},
 		{name: "current page zero", current: "0", wantErr: githost.ErrRejected},

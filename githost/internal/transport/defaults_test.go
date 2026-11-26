@@ -33,16 +33,16 @@ func defaultTransport(t *testing.T, c *Client) *http.Transport {
 }
 
 // TestDefaultTransport: with no RoundTripper, the client requires TLS 1.2, bounds dial, handshake, the
-// wait for headers and their size, bounds each attempt, follows no redirect, and takes its proxy from
-// the environment.
+// wait for headers and their size, bounds each attempt, follows no redirect, speaks HTTP/1.1 only, asks
+// for no compression, has no TLS dial hook, and takes its proxy from the environment.
 func TestDefaultTransport(t *testing.T) {
 	c, err := New(Config{Host: apiHost, Credential: githost.CredentialFunc(
 		func(context.Context, githost.Scope) (githost.Token, error) { return githost.Token{}, nil })})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.httpClient.Timeout != DefaultAttemptTimeout || c.httpClient.CheckRedirect == nil {
-		t.Errorf("client timeout %s, redirect policy set %v", c.httpClient.Timeout, c.httpClient.CheckRedirect != nil)
+	if c.attemptMax != DefaultAttemptTimeout || c.httpClient.CheckRedirect == nil {
+		t.Errorf("attempt timeout %s, redirect policy set %v", c.attemptMax, c.httpClient.CheckRedirect != nil)
 	}
 	if p := c.httpClient.Transport.(pinned); p.host != apiHost {
 		t.Errorf("pinned host %q", p.host)
@@ -62,6 +62,17 @@ func TestDefaultTransport(t *testing.T) {
 	}
 	if dialer.Timeout != 10*time.Second || dialer.KeepAlive != 30*time.Second || tr.DialContext == nil {
 		t.Errorf("dialer %+v, dial func set %v", dialer, tr.DialContext != nil)
+	}
+	if tr.ForceAttemptHTTP2 || tr.TLSNextProto == nil || len(tr.TLSNextProto) != 0 ||
+		!reflect.DeepEqual(tr.TLSClientConfig.NextProtos, []string{"http/1.1"}) ||
+		tr.Protocols == nil || tr.Protocols.HTTP2() || tr.Protocols.UnencryptedHTTP2() || !tr.Protocols.HTTP1() {
+		t.Errorf("HTTP/2 is not off: force %v, next protos %v %v, protocols %v", tr.ForceAttemptHTTP2,
+			tr.TLSNextProto, tr.TLSClientConfig.NextProtos, tr.Protocols)
+	}
+	if !tr.DisableCompression || tr.DialTLSContext != nil || tr.DialTLS != nil || dialer.Resolver == nil ||
+		dialer.Resolver == net.DefaultResolver {
+		t.Errorf("compression off %v, TLS dial hook set %v, private resolver %v", tr.DisableCompression,
+			tr.DialTLSContext != nil || tr.DialTLS != nil, dialer.Resolver != nil && dialer.Resolver != net.DefaultResolver)
 	}
 	if tr.Proxy == nil || reflect.ValueOf(tr.Proxy).Pointer() != reflect.ValueOf(http.ProxyFromEnvironment).Pointer() {
 		t.Error("proxy is not taken from the environment")

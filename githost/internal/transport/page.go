@@ -51,6 +51,18 @@ func (t Template) names(path string) bool {
 	return len(ps) == len(ts)
 }
 
+// cleanSegments reports whether every segment of an escaped path, once decoded, is what a router sees
+// as one segment: no slash or backslash, encoded or not, no "." or ".." segment, and a valid escape.
+func cleanSegments(path string) bool {
+	for seg := range strings.SplitSeq(strings.TrimPrefix(path, "/"), "/") {
+		dec, err := url.PathUnescape(seg)
+		if err != nil || dec == "." || dec == ".." || strings.ContainsAny(dec, "/\\") {
+			return false
+		}
+	}
+	return true
+}
+
 const (
 	badSegment = iota
 	fixedSegment
@@ -69,7 +81,7 @@ func segmentKind(s string) int {
 		}
 		return kind
 	}
-	if s == "" || !allIn(s, "abcdefghijklmnopqrstuvwxyz0123456789._-") {
+	if s == "" || s == "." || s == ".." || !allIn(s, "abcdefghijklmnopqrstuvwxyz0123456789._-") {
 		return badSegment
 	}
 	return fixedSegment
@@ -115,16 +127,21 @@ func (c *Client) NextPage(r Request, h http.Header) (next Request, ok bool, err 
 	untrusted := &githost.Error{Op: r.Op, Kind: githost.ErrUntrustedAnswer}
 	page, found := "", false
 	for _, link := range h.Values("Link") {
-		for part := range strings.SplitSeq(link, ",") {
-			target, params, hasParams := strings.Cut(strings.TrimSpace(part), ";")
-			if !hasParams || !isNext(params) {
+		// Commas and semicolons split the field only outside a <URI> and a quoted string.
+		links, balanced := splitOutside(link, ',')
+		if !balanced {
+			return Request{}, false, untrusted
+		}
+		for _, part := range links {
+			fields, _ := splitOutside(part, ';')
+			if len(fields) < 2 || !isNext(fields[1:]) {
 				continue
 			}
 			if found {
 				return Request{}, false, untrusted
 			}
 			found = true
-			target = strings.TrimSpace(target)
+			target := strings.TrimSpace(fields[0])
 			if !strings.HasPrefix(target, "<") || !strings.HasSuffix(target, ">") {
 				return Request{}, false, untrusted
 			}
@@ -168,16 +185,56 @@ func parsePage(s string) (int, bool) {
 	return n, true
 }
 
-func isNext(params string) bool {
-	for p := range strings.SplitSeq(params, ";") {
+// isNext reports whether one of a link's parameters is rel with "next" among its values.
+func isNext(params []string) bool {
+	for _, p := range params {
 		k, v, _ := strings.Cut(strings.TrimSpace(p), "=")
-		if strings.EqualFold(strings.TrimSpace(k), "rel") {
-			for rel := range strings.FieldsSeq(strings.Trim(strings.TrimSpace(v), `"`)) {
-				if strings.EqualFold(rel, "next") {
-					return true
-				}
+		if !strings.EqualFold(strings.TrimSpace(k), "rel") {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+			v = v[1 : len(v)-1]
+		}
+		for rel := range strings.FieldsSeq(v) {
+			if strings.EqualFold(rel, "next") {
+				return true
 			}
 		}
 	}
 	return false
+}
+
+// splitOutside splits s at each sep that is neither inside a <URI> nor inside a quoted string (RFC 8288,
+// with RFC 9110 quoted strings and their backslash escapes). balanced is false when s leaves a bracket
+// or a quote open.
+func splitOutside(s string, sep byte) (parts []string, balanced bool) {
+	inAngle, inQuote, escaped, start := false, false, false, 0
+	for i := range len(s) {
+		c := s[i]
+		switch {
+		case inQuote:
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inQuote = false
+			}
+		case inAngle:
+			inAngle = c != '>'
+		case c == '"':
+			inQuote = true
+		case c == '<':
+			inAngle = true
+		case c == sep:
+			parts = append(parts, s[start:i])
+			start = i + 1
+		}
+	}
+	if inAngle || inQuote {
+		return nil, false
+	}
+	return append(parts, s[start:]), true
 }
