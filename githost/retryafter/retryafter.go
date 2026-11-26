@@ -1,36 +1,35 @@
 // Package retryafter reads the delay an HTTP server asks a client to wait: the Retry-After header (RFC
 // 9110, section 10.2.3) and the rate limit headers GitHub sends with an exhausted quota.
 //
-// Every delay is bounded by a maximum the caller passes, and a value that cannot be parsed, is negative
-// or lies in the past gives zero. [Header] reads the reset headers when Retry-After is absent or not a
+// Every delay is bounded by a maximum the caller passes, and a value that cannot be parsed, carries a
+// sign or lies in the past gives zero. A number is ASCII digits only; one past the integer limit is the
+// largest number, so it asks for the maximum. [Header] reads the reset headers when Retry-After is absent or not a
 // valid value. The package keeps nothing, makes no request, and imports only the
 // standard library. It is not internal, so callers outside githost can use it for their own clients.
 package retryafter
 
 import (
+	"math"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
 
 // Parse reads a Retry-After value in seconds or as an HTTP date and returns the delay it asks for, capped
-// at maxDelay. A date is measured from now. A past date, a negative number or an unparsable value gives
+// at maxDelay. Seconds are ASCII digits only, without a sign; a run of digits past the integer limit asks
+// for maxDelay. A date is measured from now. A past date, a signed number or an unparsable value gives
 // zero, and so does a maxDelay of zero or less.
 func Parse(v string, now time.Time, maxDelay time.Duration) time.Duration {
 	d, _ := parse(v, now, maxDelay)
 	return d
 }
 
-// parse is Parse that also reports whether v is a valid Retry-After value: a non-negative number of
-// seconds or an HTTP date, past dates included.
+// parse is Parse that also reports whether v is a valid Retry-After value: digits only (delta-seconds)
+// or an HTTP date, past dates included.
 func parse(v string, now time.Time, maxDelay time.Duration) (time.Duration, bool) {
 	v = strings.TrimSpace(v)
 	var d time.Duration
-	if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
-		if secs < 0 {
-			return 0, false
-		}
+	if secs, ok := digits(v); ok {
 		// Capped in seconds first: a huge value must not overflow the Duration.
 		d = time.Duration(min(secs, int64(max(maxDelay, 0)/time.Second)+1)) * time.Second
 	} else if t, err := http.ParseTime(v); err == nil {
@@ -44,25 +43,53 @@ func parse(v string, now time.Time, maxDelay time.Duration) (time.Duration, bool
 	return min(max(d, 0), maxDelay), true
 }
 
+// digits reads a non-empty run of ASCII digits with no sign. A value past the integer limit is
+// math.MaxInt64: it is still a valid number, and the largest.
+func digits(v string) (int64, bool) {
+	if v == "" {
+		return 0, false
+	}
+	var n int64
+	for i := range len(v) {
+		c := v[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		if n > (math.MaxInt64-int64(c-'0'))/10 {
+			n = math.MaxInt64
+			continue
+		}
+		n = n*10 + int64(c-'0')
+	}
+	return n, true
+}
+
 // ParseReset reads a rate limit reset time in Unix seconds, as GitHub sends in X-RateLimit-Reset, and
-// returns the delay from now until then, capped at maxDelay. A past time or an unparsable value gives zero.
+// returns the delay from now until then, capped at maxDelay. The reset is ASCII digits only, without a
+// sign; a run of digits past the integer limit asks for maxDelay. The delay counts the sub-second part
+// of now. A reset at or before now, a signed number or an unparsable value gives zero, and so does a
+// maxDelay of zero or less.
 func ParseReset(v string, now time.Time, maxDelay time.Duration) time.Duration {
 	if maxDelay <= 0 {
 		return 0
 	}
-	reset, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-	if err != nil {
+	reset, ok := digits(strings.TrimSpace(v))
+	if !ok {
 		return 0
 	}
-	// Compared in seconds first: time.Unix of a huge value must not overflow the subtraction.
-	secs := reset - now.Unix()
-	if secs <= 0 {
+	nowSecs := now.Unix()
+	if reset < nowSecs {
 		return 0
 	}
-	if secs > int64(maxDelay/time.Second) {
+	// Both are known to be in order, and reset is not negative, so the difference only overflows when
+	// now is far before 1970; it is then past any cap.
+	secs := reset - nowSecs
+	if secs < 0 || secs > int64(maxDelay/time.Second)+1 {
 		return maxDelay
 	}
-	return min(max(time.Unix(reset, 0).Sub(now), 0), maxDelay)
+	// secs is small enough here for exact arithmetic in nanoseconds.
+	d := time.Duration(secs)*time.Second - time.Duration(now.Nanosecond())
+	return min(max(d, 0), maxDelay)
 }
 
 // Header returns the delay the headers of a response ask for: Retry-After when it holds a valid value

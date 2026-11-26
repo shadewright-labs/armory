@@ -123,3 +123,61 @@ func FuzzHeader(f *testing.F) {
 		}
 	})
 }
+
+// TestParseAtTheLimits: a delta-seconds value is digits only, so a sign is not a value; and a run of
+// digits past the integer limit still asks for the longest delay, never for none.
+func TestParseAtTheLimits(t *testing.T) {
+	cases := []struct {
+		v    string
+		want time.Duration
+		ok   bool
+	}{
+		{"9223372036854775808", time.Hour, true},
+		{"99999999999999999999999999999999", time.Hour, true},
+		{"9223372036854775807", time.Hour, true},
+		{"3600", time.Hour, true},
+		{"3599", 3599 * time.Second, true},
+		{"+7", 0, false},
+		{"-0", 0, false},
+		{"+0", 0, false},
+		{"-9223372036854775808", 0, false},
+		{"0x10", 0, false},
+		{"7 7", 0, false},
+		{"٧", 0, false}, // a digit of another script
+		{"0007", 7 * time.Second, true},
+	}
+	for _, c := range cases {
+		d, ok := parse(c.v, now, time.Hour)
+		if d != c.want || ok != c.ok {
+			t.Errorf("parse(%q) = %s, %v; want %s, %v", c.v, d, ok, c.want, c.ok)
+		}
+	}
+}
+
+// TestParseResetAtTheLimits: a reset is measured from now with its sub-second part, never wraps at the
+// integer limits, and a sign or a reset before now asks for no delay.
+func TestParseResetAtTheLimits(t *testing.T) {
+	cases := []struct {
+		name     string
+		v        string
+		now      time.Time
+		maxDelay time.Duration
+		want     time.Duration
+	}{
+		{"most negative reset", "-9223372036854775808", time.Unix(1, 0), time.Hour, 0},
+		{"negative reset", "-1", time.Unix(1, 0), time.Hour, 0},
+		{"most negative now", "1", time.Unix(-9223372036854775808, 0), time.Hour, time.Hour},
+		{"sub-second now", "2", time.Unix(1, 900_000_000), 500 * time.Millisecond, 100 * time.Millisecond},
+		{"sub-second now, cap above", "3", time.Unix(1, 900_000_000), 2 * time.Second, 1100 * time.Millisecond},
+		{"sub-second now, past", "1", time.Unix(1, 900_000_000), time.Hour, 0},
+		{"plus sign", "+7", time.Unix(1, 0), time.Hour, 0},
+		{"past the integer limit", "9223372036854775808", time.Unix(1, 0), time.Hour, time.Hour},
+		{"largest", "9223372036854775807", time.Unix(1, 0), time.Hour, time.Hour},
+		{"cap below a second", "2", time.Unix(1, 0), 300 * time.Millisecond, 300 * time.Millisecond},
+	}
+	for _, c := range cases {
+		if got := ParseReset(c.v, c.now, c.maxDelay); got != c.want {
+			t.Errorf("%s: ParseReset(%q) = %s, want %s", c.name, c.v, got, c.want)
+		}
+	}
+}
