@@ -150,6 +150,11 @@ func TestParseJSONInline(t *testing.T) {
 		{name: "unknown fields ignored", family: Anthropic,
 			body: `{"x":[1,{"y":null}],"usage":{"input_tokens":3,"output_tokens":4,"z":"w"}}`,
 			want: Usage{Family: Anthropic, InputTokens: 3, OutputTokens: 4}},
+		// A byte order mark before the reply is skipped, as ParseStream skips one before the stream.
+		{name: "byte order mark", family: Anthropic, body: "\xEF\xBB\xBF" + anthropicOK, want: Usage{Family: Anthropic,
+			InputTokens: 3, OutputTokens: 4}},
+		{name: "byte order mark only once", family: Anthropic, body: "\xEF\xBB\xBF\xEF\xBB\xBF" + anthropicOK,
+			wantErr: ErrMalformed},
 		{name: "malformed json", family: Anthropic, body: `{"usage":{"input_tokens":3,`, wantErr: ErrMalformed},
 		{name: "empty", family: OpenAIChat, body: ``, wantErr: ErrMalformed},
 		{name: "array", family: OpenAIChat, body: `[{"usage":{}}]`, wantErr: ErrMalformed},

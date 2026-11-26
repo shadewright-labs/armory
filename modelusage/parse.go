@@ -12,7 +12,7 @@ import (
 // ParseJSON reads a complete JSON reply of family f from r and returns its usage. It reads at most
 // lim.MaxBytes bytes and one more to tell a reply of exactly that size from a longer one.
 //
-// The reply must be one JSON object with a top-level usage block holding both the input and the output
+// A byte order mark at the start is skipped. The reply must be one JSON object with a top-level usage block holding both the input and the output
 // count of the family: input_tokens and output_tokens (Anthropic, Responses) or prompt_tokens and
 // completion_tokens (chat completions). Other counts are optional and absent or null ones are zero.
 //
@@ -30,6 +30,7 @@ func ParseJSON(f Family, r io.Reader, lim Limits) (Usage, error) {
 	if err != nil {
 		return Usage{}, fmt.Errorf("modelusage: reading the reply: %w", err)
 	}
+	data = bytes.TrimPrefix(data, byteOrderMark)
 	if !json.Valid(data) {
 		return Usage{}, ErrMalformed
 	}
@@ -120,7 +121,7 @@ func ParseStream(f Family, r io.Reader, lim Limits) (Usage, error) {
 		}
 		line := sc.Bytes()
 		if first {
-			line, first = bytes.TrimPrefix(line, []byte("\xEF\xBB\xBF")), false
+			line, first = bytes.TrimPrefix(line, byteOrderMark), false
 		}
 		if len(line) > lim.MaxLineBytes {
 			return Usage{}, &LimitError{Line: true, Limit: int64(lim.MaxLineBytes)}
@@ -185,6 +186,9 @@ func ParseStream(f Family, r io.Reader, lim Limits) (Usage, error) {
 	}
 	return st.finish()
 }
+
+// byteOrderMark is the UTF-8 byte order mark, skipped at the start of a reply or a stream.
+var byteOrderMark = []byte("\xEF\xBB\xBF")
 
 // boundedReader reads at most max+1 bytes from r, so that over tells a reply longer than max.
 type boundedReader struct {
