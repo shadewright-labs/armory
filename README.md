@@ -1,4 +1,6 @@
 # armory
+
+[![codecov](https://codecov.io/gh/shadewright-labs/armory/graph/badge.svg)](https://codecov.io/gh/shadewright-labs/armory)
 Shared Go building blocks for Shadewright Labs products: redaction, hygiene checks, tamper-evident audit chains
 
 ## Status
