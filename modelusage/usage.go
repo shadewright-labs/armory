@@ -260,22 +260,20 @@ type count struct {
 	err error
 }
 
-// parseCount accepts null (left unset) and integers only. A fraction, an exponent, a string or any other
-// value is ErrMalformed, a negative or too large integer ErrOutOfRange. The error is kept in the count, so
-// that the caller decides which error wins.
+// parseCount accepts null (left unset) and integers only. Any value that is not an optional minus sign and
+// decimal digits (a fraction, an exponent, a string) is ErrMalformed, whatever its magnitude; a negative or too
+// large integer is ErrOutOfRange. The error is kept in the count, so that the caller decides which error wins.
 func parseCount(raw json.RawMessage) count {
 	if bytes.Equal(raw, []byte("null")) {
 		return count{}
 	}
-	// ParseInt takes only an optional sign and decimal digits, so it refuses every JSON value that is not an
-	// integer; JSON itself has no leading plus sign.
-	n, err := strconv.ParseInt(string(raw), 10, 64)
-	switch {
-	case errors.Is(err, strconv.ErrRange):
-		return count{set: true, err: ErrOutOfRange}
-	case err != nil:
+	digits := bytes.TrimPrefix(raw, []byte("-"))
+	if len(digits) == 0 || bytes.ContainsFunc(digits, func(r rune) bool { return r < '0' || r > '9' }) {
 		return count{set: true, err: ErrMalformed}
-	case n < 0:
+	}
+	// Only a sign and digits are left, so ParseInt fails only on range.
+	n, err := strconv.ParseInt(string(raw), 10, 64)
+	if err != nil || n < 0 {
 		return count{set: true, err: ErrOutOfRange}
 	}
 	return count{n: n, set: true}

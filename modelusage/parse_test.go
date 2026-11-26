@@ -232,6 +232,9 @@ func TestParseJSONInline(t *testing.T) {
 			wantErr: ErrMalformed},
 		{name: "exponent", family: Anthropic, body: `{"usage":{"input_tokens":3e2,"output_tokens":4}}`,
 			wantErr: ErrMalformed},
+		// The class follows the form, not the size: a long exponent form is malformed, not out of range.
+		{name: "exponent with a long mantissa", family: Anthropic,
+			body: `{"usage":{"input_tokens":100000000000000000000e-20,"output_tokens":4}}`, wantErr: ErrMalformed},
 		{name: "string count", family: OpenAIChat, body: `{"usage":{"prompt_tokens":"3","completion_tokens":4}}`,
 			wantErr: ErrMalformed},
 		{name: "beyond int64", family: OpenAIChat,
