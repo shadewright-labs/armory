@@ -75,6 +75,9 @@ type Error struct {
 }
 
 func (e *Error) Error() string {
+	if e == nil {
+		return "githost: nil error"
+	}
 	s := "githost: " + e.Op
 	if e.Status != 0 {
 		s += ": status " + strconv.Itoa(e.Status)
@@ -85,8 +88,13 @@ func (e *Error) Error() string {
 	return s
 }
 
-// Unwrap returns the kind.
-func (e *Error) Unwrap() error { return e.Kind }
+// Unwrap returns the kind; nil for a nil *Error.
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Kind
+}
 
 // RetryableError is a transient failure, with the delay the host asked for when it asked for one. It
 // matches [ErrRetryable] with [errors.Is].
@@ -98,14 +106,22 @@ type RetryableError struct {
 }
 
 func (e *RetryableError) Error() string {
+	if e == nil {
+		return "retryable"
+	}
 	if e.RetryAfter > 0 {
 		return fmt.Sprintf("retryable (after %s): %v", e.RetryAfter, e.Err)
 	}
 	return fmt.Sprintf("retryable: %v", e.Err)
 }
 
-// Unwrap returns the underlying error.
-func (e *RetryableError) Unwrap() error { return e.Err }
+// Unwrap returns the underlying error; nil for a nil *RetryableError.
+func (e *RetryableError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
 
 // Is reports whether target is [ErrRetryable].
 func (e *RetryableError) Is(target error) bool { return target == ErrRetryable }

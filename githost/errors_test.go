@@ -111,3 +111,18 @@ func TestRefusalValid(t *testing.T) {
 		t.Errorf("Error() of an invalid class = %q, want the fixed text only", got)
 	}
 }
+
+// TestNilErrorsDoNotPanic: a typed nil *Error or *RetryableError, which a callback may return by mistake,
+// prints and unwraps without a panic.
+func TestNilErrorsDoNotPanic(t *testing.T) {
+	var e *Error
+	var r *RetryableError
+	for _, err := range []error{e, r} {
+		_ = err.Error()
+		_ = errors.Unwrap(err)
+		_ = errors.Is(err, ErrNotFound)
+	}
+	if !errors.Is(r, ErrRetryable) {
+		t.Error("a nil *RetryableError no longer matches ErrRetryable")
+	}
+}
