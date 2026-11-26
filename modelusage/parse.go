@@ -61,8 +61,13 @@ func usageOf(o object, f Family, maxTokens int64) (Usage, error) {
 // refuses a line, or the joined data of one event, longer than lim.MaxLineBytes. Lines end in LF, CRLF or a
 // bare CR, and a byte order mark at the start of the stream is skipped, as the server-sent events format
 // allows. Comment lines and fields other than data are ignored; the data lines of one event are joined with
-// LF and decoded as one JSON value. Events of unknown
-// types are ignored. An event after the final one is ErrMalformed.
+// LF and decoded as one JSON value. Events of unknown types are ignored.
+//
+// After the final event, a second final event, or an event that would change the counts, is ErrMalformed.
+// Other events after it are ignored, including an error event, since the counts are already final: the
+// Anthropic stream may send ping events at any point, and the Responses API reference does not say that
+// the final event is the last one sent. Chat completions are stricter: their reference ends the stream with
+// [DONE], so any event after it is ErrMalformed.
 //
 // Which usage counts, per family:
 //
@@ -76,7 +81,8 @@ func usageOf(o object, f Family, maxTokens int64) (Usage, error) {
 //     no usage is ErrNoUsage.
 //   - OpenAIResponses: usage is read only from the response.usage of the final event, which is one of
 //     response.completed, response.incomplete or response.failed; usage in earlier events is ignored. A
-//     second final event is ErrMalformed, because the counts of two responses cannot be told apart.
+//     second final event is ErrMalformed, because the counts of two responses cannot be told apart. A [DONE]
+//     line after the final event, which servers that copy chat completions send, is ignored.
 //
 // The Usage is final only when the error is nil. A stream that ends before its final event, whose reader
 // fails after at least one usage block, or that carries an error event (Anthropic and Responses type error,
@@ -157,17 +163,19 @@ func ParseStream(f Family, r io.Reader, lim Limits) (Usage, error) {
 		}
 		return Usage{}, fmt.Errorf("modelusage: reading the stream: %w", err)
 	}
-	if pending && !st.done {
+	if pending {
 		// The stream ended without the blank line that closes an event. A complete event still counts; a cut
-		// one is the sign of a cut stream.
+		// one is the sign of a cut stream, and after the final event it changes nothing.
+		wasDone := st.done
 		if err := st.event(data); err != nil {
-			if errors.Is(err, ErrMalformed) {
+			switch {
+			case errors.Is(err, ErrMalformed) && wasDone:
+			case errors.Is(err, ErrMalformed):
 				return st.fail(ErrTruncated)
+			default:
+				return st.fail(err)
 			}
-			return st.fail(err)
 		}
-	} else if pending {
-		return Usage{}, ErrMalformed
 	}
 	return st.finish()
 }
@@ -205,11 +213,10 @@ type streamState struct {
 	done      bool           // the final event was read
 }
 
-// event handles the data of one event.
+// event handles the data of one event. After the final event, an event that would change the counts or end
+// the reply a second time is ErrMalformed, and any other is ignored, except in chat completions, whose
+// [DONE] ends the stream.
 func (s *streamState) event(data []byte) error {
-	if s.done {
-		return ErrMalformed
-	}
 	switch s.family {
 	case Anthropic:
 		return s.anthropicEvent(data)
@@ -250,16 +257,19 @@ func (s *streamState) anthropicEvent(data []byte) error {
 		s.started = true
 		return s.merge(msg)
 	case "message_delta":
-		if !s.started {
+		if !s.started || s.done {
 			return ErrMalformed
 		}
 		return s.merge(ev)
 	case "message_stop":
-		if !s.started {
+		if !s.started || s.done {
 			return ErrMalformed
 		}
 		s.done = true
 	case "error":
+		if s.done {
+			return nil
+		}
 		return ErrTruncated
 	}
 	return nil
@@ -289,6 +299,9 @@ func (s *streamState) merge(parent object) error {
 }
 
 func (s *streamState) chatEvent(data []byte) error {
+	if s.done {
+		return ErrMalformed
+	}
 	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
 		s.done = true
 		return nil
@@ -313,12 +326,18 @@ func (s *streamState) chatEvent(data []byte) error {
 }
 
 func (s *streamState) responsesEvent(data []byte) error {
+	if s.done && bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+		return nil
+	}
 	ev, typ, err := decodeEvent(data)
 	if err != nil {
 		return err
 	}
 	switch typ {
 	case "response.completed", "response.incomplete", "response.failed":
+		if s.done {
+			return ErrMalformed
+		}
 		resp, err := ev.child("response")
 		if err != nil {
 			return err
@@ -336,6 +355,9 @@ func (s *streamState) responsesEvent(data []byte) error {
 		}
 		s.usage, s.seen, s.done = u, true, true
 	case "error":
+		if s.done {
+			return nil
+		}
 		return ErrTruncated
 	}
 	return nil
