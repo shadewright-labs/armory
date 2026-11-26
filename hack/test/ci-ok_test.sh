@@ -5,16 +5,17 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 fails=0
 
-# needs <go> <codeql> then job=result pairs that override the default "success".
+# needs <go> <docs> <codeql> then job=result pairs that override the default "success".
 needs() {
-  local go="$1" codeql="$2"
-  shift 2
+  local go="$1" docs="$2" codeql="$3"
+  shift 3
   local json
-  json="$(jq -n --arg go "${go}" --arg codeql "${codeql}" '{
-    changes: {result: "success", outputs: {go: $go, codeql: $codeql}},
+  json="$(jq -n --arg go "${go}" --arg docs "${docs}" --arg codeql "${codeql}" '{
+    changes: {result: "success", outputs: {go: $go, docs: $docs, codeql: $codeql}},
     lint: {result: "success"}, test: {result: "success"}, govulncheck: {result: "success"},
-    gosec: {result: "success"}, codeql: {result: "success"}, "workflow-lint": {result: "success"},
-    "secret-scan": {result: "success"}, "repo-checks": {result: "success"}}')"
+    gosec: {result: "success"}, "docs-check": {result: "success"}, codeql: {result: "success"},
+    "workflow-lint": {result: "success"}, "secret-scan": {result: "success"},
+    "repo-checks": {result: "success"}}')"
   local kv
   for kv in "$@"; do
     case "${kv}" in
@@ -34,26 +35,27 @@ check() {
   if [ "${got}" = "$2" ]; then echo "ok   $1"; else echo "FAIL $1: got ${got}, want $2"; fails=$((fails + 1)); fi
 }
 
-check "all selected and successful" pass pull_request "$(needs true true)"
-check "legitimately skipped by the decision" pass pull_request "$(needs false false lint=skipped test=skipped govulncheck=skipped gosec=skipped codeql=skipped)"
-check "codeql skipped on push" pass push "$(needs true true codeql=skipped)"
-check "selected job skipped" fail pull_request "$(needs true true test=skipped)"
-check "selected codeql skipped" fail pull_request "$(needs true true codeql=skipped)"
-check "always-run job skipped" fail pull_request "$(needs false false secret-scan=skipped)"
-check "repo checks skipped" fail pull_request "$(needs false false repo-checks=skipped)"
-check "workflow lint skipped" fail pull_request "$(needs false false workflow-lint=skipped)"
-check "missing job entry" fail pull_request "$(needs true true -test)"
-check "missing deselected job entry" fail pull_request "$(needs false false -lint)"
-check "failure" fail pull_request "$(needs true true lint=failure)"
+check "all selected and successful" pass pull_request "$(needs true true true)"
+check "legitimately skipped by the decision" pass pull_request "$(needs false false false lint=skipped test=skipped govulncheck=skipped gosec=skipped docs-check=skipped codeql=skipped)"
+check "codeql skipped on push" pass push "$(needs true true true codeql=skipped)"
+check "selected job skipped" fail pull_request "$(needs true true true test=skipped)"
+check "selected docs-check skipped" fail pull_request "$(needs false true false docs-check=skipped)"
+check "selected codeql skipped" fail pull_request "$(needs true true true codeql=skipped)"
+check "always-run job skipped" fail pull_request "$(needs false false false secret-scan=skipped)"
+check "repo checks skipped" fail pull_request "$(needs false false false repo-checks=skipped)"
+check "workflow lint skipped" fail pull_request "$(needs false false false workflow-lint=skipped)"
+check "missing job entry" fail pull_request "$(needs true true true -test)"
+check "missing deselected job entry" fail pull_request "$(needs false false false -lint)"
+check "failure" fail pull_request "$(needs true true true lint=failure)"
 # test.yml holds the test and coverage upload jobs; ci-ok sees one result for both, failure if either failed.
-check "test workflow failed (tests or coverage upload)" fail pull_request "$(needs true true test=failure)"
-check "failure of a deselected job" fail pull_request "$(needs false true lint=failure)"
-check "cancelled" fail pull_request "$(needs true true gosec=cancelled)"
-check "changes failed" fail pull_request "$(needs true true changes=failure)"
-check "changes skipped" fail pull_request "$(needs true true changes=skipped)"
-check "output missing" fail pull_request "$(needs true true changes.outputs.-go)"
-check "output empty" fail pull_request "$(needs true true changes.outputs.go=)"
-check "output not a boolean" fail pull_request "$(needs true true changes.outputs.codeql=yes)"
+check "test workflow failed (tests or coverage upload)" fail pull_request "$(needs true true true test=failure)"
+check "failure of a deselected job" fail pull_request "$(needs false false true lint=failure)"
+check "cancelled" fail pull_request "$(needs true true true gosec=cancelled)"
+check "changes failed" fail pull_request "$(needs true true true changes=failure)"
+check "changes skipped" fail pull_request "$(needs true true true changes=skipped)"
+check "output missing" fail pull_request "$(needs true true true changes.outputs.-go)"
+check "output empty" fail pull_request "$(needs true true true changes.outputs.go=)"
+check "output not a boolean" fail pull_request "$(needs true true true changes.outputs.docs=yes)"
 check "not JSON" fail pull_request "not json"
 
 # The table in hack/ci-ok.sh and the needs of the ci-ok job must name the same jobs.
