@@ -1,0 +1,108 @@
+/*
+ * Full-width constellation background for the home page hero (.arm-hero).
+ * Ivory (#EFE6D2) dots and thin lines with violet crystal (#8B3DFF, #B794FF) accents span the
+ * viewport width, leaving the central text column clear and shielded by a soft ground veil.
+ *
+ * Text contrast against the brightest pixel behind the hero text (measured #09070f; ground #08060e):
+ *   .arm-lore and .arm-tagline (#bbb4c5 on #09070f): 9.96:1 (>= 7:1)
+ *   lockup and bone text (#efe9dc on #09070f): 16.55:1 (>= 7:1)
+ *
+ * Motion runs inside docs/assets/hero/hero-constellation.svg using opacity and transform only
+ * (21s to 29s loops) and stops under prefers-reduced-motion: reduce.
+ */
+
+.md-main:has(.arm-hero) {
+  overflow-x: clip;
+}
+.md-main__inner:has(.arm-hero) {
+  margin-top: 0;
+}
+.md-content__inner:has(.arm-hero) {
+  position: relative;
+  padding-top: 0;
+}
+.md-content__inner:has(.arm-hero)::before {
+  display: none;
+}
+.md-content__inner:has(.arm-hero) > .md-content__button {
+  position: absolute;
+  top: 0.9rem;
+  right: 0;
+  z-index: 3;
+  margin-top: 0;
+}
+
+.arm-hero {
+  position: relative;
+  box-sizing: border-box;
+  width: 100vw;
+  margin: 0 calc(50% - 50vw) 2.5rem;
+  padding: 4.8rem 1.5rem 5.1rem;
+  border-radius: 0;
+  background-color: var(--am-ground);
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.arm-hero h1.arm-visually-hidden {
+  top: 6rem;
+}
+
+.arm-hero img {
+  mix-blend-mode: lighten;
+}
+
+/* Constellation sky: stays near 1:1 around the central text width and fades at outer and bottom edges. */
+.arm-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background: url("../assets/hero/hero-constellation.svg") center 50% / max(1920px, 100vw) auto no-repeat;
+  -webkit-mask-image:
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.55) 0%, #000 10%, #000 84%, transparent 100%),
+    linear-gradient(to right, transparent 0%, #000 8%, #000 92%, transparent 100%);
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.55) 0%, #000 10%, #000 84%, transparent 100%),
+    linear-gradient(to right, transparent 0%, #000 8%, #000 92%, transparent 100%);
+  mask-composite: intersect;
+}
+
+/* Soft ground veil over the central text column so shapes stay behind and clear of the letters. */
+.arm-hero::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      ellipse 27rem 12.5rem at 50% 52%,
+      rgba(8, 6, 14, 0.98) 0%,
+      rgba(8, 6, 14, 0.92) 64%,
+      rgba(8, 6, 14, 0) 100%
+    ),
+    radial-gradient(
+      ellipse 21rem 8rem at 50% 27%,
+      rgba(8, 6, 14, 0.94) 0%,
+      rgba(8, 6, 14, 0) 100%
+    );
+}
+
+@media (max-width: 68em) {
+  .arm-hero::before {
+    opacity: 0.65;
+  }
+}
+
+@media (max-width: 44.9375em) {
+  .arm-hero {
+    padding: 2rem 1rem 1.75rem;
+  }
+  .arm-hero::before,
+  .arm-hero::after {
+    display: none;
+  }
+}

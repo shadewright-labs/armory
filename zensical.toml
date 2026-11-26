@@ -9,7 +9,7 @@ repo_url = "https://github.com/shadewright-labs/armory"
 repo_name = "shadewright-labs/armory"
 edit_uri = "edit/main/docs/"
 copyright = "Copyright 2026 The Shadewright Labs Authors. Licensed under the Apache License 2.0."
-extra_css = ["stylesheets/brand.css", "stylesheets/labs-switcher.css"]
+extra_css = ["stylesheets/brand.css", "stylesheets/labs-switcher.css", "stylesheets/hero-bg.css"]
 extra_javascript = ["javascripts/labs-switcher.js"]
 
 nav = [
