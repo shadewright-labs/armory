@@ -1,0 +1,17 @@
+# Coverage is reported, never a gate: CI does not fail on it (see the coverage job in .github/workflows/ci.yml).
+coverage:
+  status:
+    # Show the project and patch results on the pull request without blocking it.
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+# No Codecov comment on pull requests; the status checks carry the result.
+comment: false
+
+# Test fixtures are not counted.
+ignore:
+  - "**/testdata/**"
