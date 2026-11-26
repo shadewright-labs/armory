@@ -22,11 +22,12 @@ const (
 const placeholder = "[redacted token]"
 
 // Token is a short-lived secret for one host. It never reveals its value: it prints and formats as a
-// placeholder with every fmt verb except %T (which prints the type name) and %p on a pointer (which
-// prints the address), and marshals as a placeholder with JSON and text encoders (gob refuses it as
-// having no exported fields). No exported function or method returns its value or writes it anywhere:
-// the package's own transport sets it in the Authorization header of a request, after it has checked
-// the request against the one https origin the client is pinned to.
+// placeholder with every fmt verb except %T (which prints the type name) and %p (which prints the
+// address on a pointer or a fmt type mismatch on a value, without calling Format), and marshals as a
+// placeholder with JSON and text encoders (gob refuses it as having no exported fields). No exported
+// function or method returns its value or writes it anywhere: the package's own transport sets it in
+// the Authorization header of a request, after it has checked the request against the one https origin
+// the client is pinned to.
 //
 // When a Token is an unexported field of another struct, fmt walks that struct without calling Token's
 // methods. A pointer is not enough to hide the value then: with a verb a pointer does not take, such as
@@ -76,7 +77,7 @@ func (Token) String() string { return placeholder }
 func (Token) GoString() string { return "githost.Token{" + placeholder + "}" }
 
 // Format writes a placeholder for every verb and flag passed to it. Note that fmt handles %T (type
-// name) and %p on a *Token (address) without calling Format.
+// name) and %p (address on a pointer, or a type mismatch on a value) without calling Format.
 func (Token) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(placeholder)) }
 
 // MarshalJSON returns a placeholder as a JSON string.

@@ -118,6 +118,7 @@ func FuzzParse(f *testing.F) {
 	f.Add(pastInt64Max, now.Unix(), int64(900_000_000), int64(math.MaxInt64))
 	f.Add("2", int64(1), int64(900_000_000), int64(500*time.Millisecond))
 	f.Add("1", int64(math.MinInt64), int64(0), int64(time.Hour))
+	f.Add(strings.Repeat("0", 256)+"1", now.Unix(), int64(0), int64(maxDelay))
 	f.Fuzz(func(t *testing.T, v string, nowUnix, nowNsec, capNs int64) {
 		at := time.Unix(nowUnix, nowNsec)
 		capDur := time.Duration(capNs)
@@ -125,7 +126,7 @@ func FuzzParse(f *testing.F) {
 		if d < 0 || (capDur <= 0 && d != 0) || (capDur > 0 && d > capDur) {
 			t.Fatalf("Parse(%q, %v, %d) = %d", v, at, capDur, d)
 		}
-		if capDur > 0 {
+		if capDur > 0 && len(v) <= maxValueLen {
 			if secs, ok := digits(strings.TrimSpace(v)); ok {
 				if secs > int64(capDur/time.Second) && d != capDur {
 					t.Fatalf("Parse(%q, %v, %d) = %d, want cap %d", v, at, capDur, d, capDur)
@@ -266,5 +267,16 @@ func TestParseResetAtTheLimits(t *testing.T) {
 		if got := ParseReset(c.v, c.now, c.maxDelay); got != c.want {
 			t.Errorf("%s: ParseReset(%q) = %s, want %s", c.name, c.v, got, c.want)
 		}
+	}
+}
+
+// TestInputByteLimit: oversized inputs are rejected without scanning unbounded leading zeroes.
+func TestInputByteLimit(t *testing.T) {
+	longZeroes := strings.Repeat("0", 65536) + "1"
+	if got := Parse(longZeroes, now, time.Hour); got != 0 {
+		t.Errorf("Parse(65536 zeroes + 1) = %s, want 0", got)
+	}
+	if got := ParseReset(longZeroes, now, time.Hour); got != 0 {
+		t.Errorf("ParseReset(65536 zeroes + 1) = %s, want 0", got)
 	}
 }

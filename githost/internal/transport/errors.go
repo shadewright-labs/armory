@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 
 	"github.com/shadewright-labs/armory/githost"
 )
@@ -89,6 +90,13 @@ func (c *Client) transportError(ctx context.Context, op string, err error) error
 	if errors.Is(err, errOffOrigin) {
 		return &githost.Error{Op: op, Kind: githost.ErrRejected}
 	}
+	if errors.Is(err, errCleartextProxyAuth) {
+		head := &githost.Error{Op: op, Kind: githost.ErrRejected}
+		return &kindsError{
+			msg:   head.Error() + ": proxy credentials require an https proxy",
+			kinds: []error{head},
+		}
+	}
 	var ne net.Error
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
 		return &githost.RetryableError{Err: fixed(op, "request timed out")}
@@ -127,8 +135,12 @@ func credentialError(op string, err error) error {
 	return fixed(op, msg)
 }
 
-// StatusError classifies a status the host client did not handle itself.
+// StatusError classifies a status the host client did not handle itself. An op that is not a valid
+// label is replaced with a fixed one.
 func StatusError(op string, status int) error {
+	if !validOp(op) {
+		op = opDo
+	}
 	var kind error
 	switch status {
 	case http.StatusNotFound, http.StatusGone:
@@ -185,4 +197,100 @@ func validHeader(h http.Header) bool {
 		}
 	}
 	return true
+}
+
+// validIfNoneMatch reports whether s is a syntactically valid RFC 9110 If-None-Match value: "*" or a
+// comma-separated list of one or more optionally weak quoted entity-tags.
+func validIfNoneMatch(s string) bool {
+	s = trimOWS(s)
+	if s == "" {
+		return false
+	}
+	if s == "*" {
+		return true
+	}
+	i := 0
+	for {
+		i = skipOWS(s, i)
+		var ok bool
+		i, ok = parseEntityTag(s, i)
+		if !ok {
+			return false
+		}
+		i = skipOWS(s, i)
+		if i == len(s) {
+			return true
+		}
+		if s[i] != ',' {
+			return false
+		}
+		i++
+	}
+}
+
+func parseEntityTag(s string, i int) (int, bool) {
+	if strings.HasPrefix(s[i:], "W/") {
+		i += 2
+	}
+	if i >= len(s) || s[i] != '"' {
+		return 0, false
+	}
+	i++
+	for i < len(s) && s[i] != '"' {
+		b := s[i]
+		// RFC 9110 section 8.8.3: etagc = %x21 / %x23-7E / obs-text (%x80-FF).
+		if b < 0x21 || b == 0x7f {
+			return 0, false
+		}
+		i++
+	}
+	if i >= len(s) || s[i] != '"' {
+		return 0, false
+	}
+	return i + 1, true
+}
+
+func skipOWS(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	return i
+}
+
+func trimOWS(s string) string {
+	start := skipOWS(s, 0)
+	end := len(s)
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+		end--
+	}
+	return s[start:end]
+}
+
+// validIfModifiedSince reports whether s is an HTTP-date accepted by http.ParseTime.
+func validIfModifiedSince(s string) bool {
+	if s == "" {
+		return false
+	}
+	_, err := http.ParseTime(s)
+	return err == nil
+}
+
+// hasValidCondition reports whether h carries a usable If-None-Match or If-Modified-Since validator.
+func hasValidCondition(h http.Header) bool {
+	if inm := h.Values("If-None-Match"); len(inm) > 0 {
+		valid := true
+		for _, v := range inm {
+			if !validIfNoneMatch(v) {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			return true
+		}
+	}
+	if ims := h.Values("If-Modified-Since"); len(ims) == 1 && validIfModifiedSince(ims[0]) {
+		return true
+	}
+	return false
 }

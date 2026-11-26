@@ -17,6 +17,12 @@ import (
 	"github.com/shadewright-labs/armory/githost"
 )
 
+const (
+	hIfModifiedSince = "If-Modified-Since"
+	blankField       = " \t "
+	httpDate         = "Wed, 25 Nov 2026 12:00:00 GMT"
+)
+
 // TestRedirectOnWrite: a 3xx answer to a write, a 303 after a POST above all, may follow a write the
 // host carried out. It is never followed and never read as "nothing was written": it matches
 // ErrOutcomeUnknown with its status kept, is not retried, and the target gets nothing.
@@ -61,7 +67,7 @@ func TestNotModifiedOnlyConditional(t *testing.T) {
 		{"GET with If-None-Match", http.MethodGet, etagV1, nil, true, false},
 		{"HEAD with If-None-Match", http.MethodHead, etagV1, nil, true, false},
 		{"GET with If-Modified-Since", http.MethodGet, "",
-			http.Header{"If-Modified-Since": {"Wed, 25 Nov 2026 12:00:00 GMT"}}, true, false},
+			http.Header{hIfModifiedSince: {httpDate}}, true, false},
 		{"GET unconditional", http.MethodGet, "", nil, false, false},
 		{"HEAD unconditional", http.MethodHead, "", nil, false, false},
 		{"POST with If-None-Match", http.MethodPost, etagV1, nil, false, true},
@@ -205,6 +211,8 @@ func TestNewRefusesBadHeaders(t *testing.T) {
 		"name with a colon":      {Header: http.Header{"X:y": {"1"}}},
 		"user agent with a NUL":  {UserAgent: "a\x00b"},
 		"accept-encoding":        {Header: http.Header{"Accept-Encoding": {"gzip"}}},
+		"proxy-authorization":    {Header: http.Header{"Proxy-Authorization": {"fixture"}}},
+		"proxy-auth lowercase":   {Header: http.Header{"proxy-authorization": {"fixture"}}},
 	}
 	for name, cfg := range cases {
 		cfg.Host, cfg.Credential = apiHost, tokenCred(tokenCanary)
@@ -375,4 +383,154 @@ func TestTypedNilCallbacks(t *testing.T) {
 			_ = err.Error()
 		})
 	}
+}
+
+// TestSlowWriteCheckNotOutcomeUnknown: when the attempt timeout expires while the write check runs and
+// the check returns nil, nothing was sent, so the failure must not match ErrOutcomeUnknown. If an earlier
+// attempt of the same call may have written, the earlier-attempt rule still applies.
+func TestSlowWriteCheckNotOutcomeUnknown(t *testing.T) {
+	t.Run("first attempt slow check", func(t *testing.T) {
+		s := newServer(t, func(w http.ResponseWriter, _ *http.Request, _ int) { okBody(w) })
+		var checks int
+		h := newHarness(t, s, func(cfg *Config) {
+			cfg.AttemptTimeout = 10 * time.Millisecond
+			cfg.WriteCheck = func(context.Context, Send) error {
+				checks++
+				time.Sleep(60 * time.Millisecond)
+				return nil
+			}
+		})
+		_, err := h.c.Do(t.Context(), post(false))
+		if err == nil {
+			t.Fatal("Do succeeded, want a pre-send failure")
+		}
+		if errors.Is(err, githost.ErrOutcomeUnknown) {
+			t.Fatalf("Do = %v, must not match ErrOutcomeUnknown when nothing was sent", err)
+		}
+		if checks != 1 || s.hits.Load() != 0 {
+			t.Errorf("checks = %d, host hits = %d; want 1 and 0", checks, s.hits.Load())
+		}
+		assertScrubbed(t, s, err)
+	})
+	t.Run("slow check after lost earlier attempt", func(t *testing.T) {
+		s := newServer(t, func(w http.ResponseWriter, _ *http.Request, _ int) {
+			w.WriteHeader(http.StatusBadGateway)
+		})
+		var checks int
+		h := newHarness(t, s, func(cfg *Config) {
+			cfg.AttemptTimeout = 15 * time.Millisecond
+			cfg.MaxAttempts = 2
+			cfg.WriteCheck = func(_ context.Context, sd Send) error {
+				checks++
+				if sd.Attempt == 2 {
+					time.Sleep(60 * time.Millisecond)
+				}
+				return nil
+			}
+		})
+		_, err := h.c.Do(t.Context(), post(true))
+		if !errors.Is(err, githost.ErrOutcomeUnknown) || errors.Is(err, githost.ErrRetryable) {
+			t.Fatalf("Do = %v, want ErrOutcomeUnknown and not retryable", err)
+		}
+		if checks != 2 || s.hits.Load() != 1 {
+			t.Errorf("checks = %d, host hits = %d; want 2 and 1", checks, s.hits.Load())
+		}
+		assertScrubbed(t, s, err)
+	})
+}
+
+// TestConditionalValidators: blank or malformed If-None-Match and unparsable If-Modified-Since are
+// refused before any send, so a 304 is accepted only when a valid validator was sent.
+func TestConditionalValidators(t *testing.T) {
+	cases := []struct {
+		name    string
+		inm     string
+		header  http.Header
+		wantErr error
+	}{
+		{"valid strong etag", etagV1, nil, nil},
+		{"valid weak etag", `W/"v1"`, nil, nil},
+		{"valid wildcard", "*", nil, nil},
+		{"valid list", `"v1", W/"v2", ""`, nil, nil},
+		{"valid if-modified-since", "", http.Header{hIfModifiedSince: {httpDate}}, nil},
+		{"blank if-none-match", blankField, nil, githost.ErrRejected},
+		{"unquoted etag", "v1", nil, githost.ErrRejected},
+		{"lowercase weak prefix", `w/"v1"`, nil, githost.ErrRejected},
+		{"unclosed quote", `"v1`, nil, githost.ErrRejected},
+		{"trailing comma", `"v1",`, nil, githost.ErrRejected},
+		{"leading comma", `,"v1"`, nil, githost.ErrRejected},
+		{"empty list item", `"v1", , "v2"`, nil, githost.ErrRejected},
+		{"wildcard in list", `*, "v1"`, nil, githost.ErrRejected},
+		{"space inside etag", `"v 1"`, nil, githost.ErrRejected},
+		{"header blank if-none-match", "", http.Header{"If-None-Match": {blankField}}, githost.ErrRejected},
+		{"invalid if-modified-since", "", http.Header{hIfModifiedSince: {"yesterday"}}, githost.ErrRejected},
+		{"blank if-modified-since", "", http.Header{hIfModifiedSince: {blankField}}, githost.ErrRejected},
+		{"rfc3339 if-modified-since", "", http.Header{hIfModifiedSince: {"2026-11-25T12:00:00Z"}}, githost.ErrRejected},
+		{"multiple if-modified-since", "", http.Header{hIfModifiedSince: {
+			httpDate, "Thu, 26 Nov 2026 12:00:00 GMT"}}, githost.ErrRejected},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newServer(t, func(w http.ResponseWriter, _ *http.Request, _ int) {
+				w.WriteHeader(http.StatusNotModified)
+			})
+			h := newHarness(t, s, func(cfg *Config) { cfg.Header = c.header })
+			r := get()
+			r.IfNoneMatch = c.inm
+			resp, err := h.c.Do(t.Context(), r)
+			if c.wantErr != nil {
+				if !errors.Is(err, c.wantErr) || resp.Status != 0 {
+					t.Fatalf("Do = %+v, %v; want %v", resp, err, c.wantErr)
+				}
+				if s.hits.Load() != 0 || h.creds.Load() != 0 {
+					t.Errorf("host hits = %d, creds = %d; want 0 and 0", s.hits.Load(), h.creds.Load())
+				}
+				return
+			}
+			if err != nil || resp.Status != http.StatusNotModified {
+				t.Fatalf("Do = %+v, %v; want 304", resp, err)
+			}
+		})
+	}
+}
+
+// TestHelperOpLabelValidated: StatusError and NextPage never print an invalid operation label.
+func TestHelperOpLabelValidated(t *testing.T) {
+	const badLabel = "fixture label"
+	err := StatusError(badLabel, http.StatusNotFound)
+	if !errors.Is(err, githost.ErrNotFound) || strings.Contains(err.Error(), badLabel) {
+		t.Errorf("StatusError(%q, 404) = %q, want ErrNotFound without the bad label", badLabel, err)
+	}
+	c, cerr := New(Config{Host: apiHost, Credential: tokenCred(tokenCanary)})
+	if cerr != nil {
+		t.Fatal(cerr)
+	}
+	r := get()
+	r.Op = badLabel
+	r.Query.Set(pageParam, "bad")
+	_, ok, nerr := c.NextPage(r, http.Header{})
+	if ok || !errors.Is(nerr, githost.ErrRejected) || strings.Contains(nerr.Error(), badLabel) {
+		t.Errorf("NextPage(bad op) = %v, %q; want ErrRejected without the bad label", ok, nerr)
+	}
+}
+
+// FuzzValidIfNoneMatch: no input panics, and every accepted value is non-blank and has no control bytes.
+func FuzzValidIfNoneMatch(f *testing.F) {
+	for _, s := range []string{
+		"", blankField, "*", " * ", `"v1"`, `W/"v1"`, `w/"v1"`, `""`, `W/""`,
+		`"a", "b"`, `"a", W/"b"`, `"a",`, `,"a"`, `"a", , "b"`, `*, "a"`, `"a b"`, "\"a\x00\"",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		if !validIfNoneMatch(s) {
+			return
+		}
+		if strings.Trim(s, " \t") == "" {
+			t.Fatalf("accepted blank If-None-Match %q", s)
+		}
+		if !validFieldValue(s) {
+			t.Fatalf("accepted invalid field value %q", s)
+		}
+	})
 }

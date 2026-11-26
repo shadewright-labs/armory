@@ -1,11 +1,12 @@
 // Package retryafter reads the delay an HTTP server asks a client to wait: the Retry-After header (RFC
 // 9110, section 10.2.3) and the rate limit headers GitHub sends with an exhausted quota.
 //
-// Every delay is bounded by a maximum the caller passes, and a value that cannot be parsed, carries a
-// sign or lies in the past gives zero. A number is ASCII digits only; one past the integer limit is the
-// largest number, so it asks for the maximum. [Header] reads the reset headers when Retry-After is absent or not a
-// valid value. The package keeps nothing, makes no request, and imports only the
-// standard library. It is not internal, so callers outside githost can use it for their own clients.
+// Every delay is bounded by a maximum the caller passes, and inputs longer than 128 bytes are rejected
+// without scanning. A value that cannot be parsed, carries a sign or lies in the past gives zero. A
+// number is ASCII digits only; one past the integer limit is the largest number, so it asks for the
+// maximum. [Header] reads the reset headers when Retry-After is absent or not a valid value. The package
+// keeps nothing, makes no request, and imports only the standard library. It is not internal, so callers
+// outside githost can use it for their own clients.
 package retryafter
 
 import (
@@ -15,10 +16,15 @@ import (
 	"time"
 )
 
+// maxValueLen bounds the byte length of any header value the package parses. An HTTP-date is at most
+// 35 bytes and an integer well past math.MaxInt64 is a few dozen digits, so longer inputs are rejected
+// without scanning them.
+const maxValueLen = 128
+
 // Parse reads a Retry-After value in seconds or as an HTTP date and returns the delay it asks for, capped
 // at maxDelay. Seconds are ASCII digits only, without a sign; a run of digits past the integer limit asks
-// for maxDelay. A date is measured from now. A past date, a signed number or an unparsable value gives
-// zero, and so does a maxDelay of zero or less.
+// for maxDelay. A date is measured from now. An input longer than 128 bytes, a past date, a signed
+// number or an unparsable value gives zero, and so does a maxDelay of zero or less.
 func Parse(v string, now time.Time, maxDelay time.Duration) time.Duration {
 	d, _ := parse(v, now, maxDelay)
 	return d
@@ -27,6 +33,9 @@ func Parse(v string, now time.Time, maxDelay time.Duration) time.Duration {
 // parse is Parse that also reports whether v is a valid Retry-After value: digits only (delta-seconds)
 // or an HTTP date, past dates included.
 func parse(v string, now time.Time, maxDelay time.Duration) (time.Duration, bool) {
+	if len(v) > maxValueLen {
+		return 0, false
+	}
 	v = strings.TrimSpace(v)
 	if secs, ok := digits(v); ok {
 		if maxDelay <= 0 {
@@ -72,10 +81,10 @@ func digits(v string) (int64, bool) {
 // ParseReset reads a rate limit reset time in Unix seconds, as GitHub sends in X-RateLimit-Reset, and
 // returns the delay from now until then, capped at maxDelay. The reset is ASCII digits only, without a
 // sign; a run of digits past the integer limit asks for maxDelay. The delay counts the sub-second part
-// of now. A reset at or before now, a signed number or an unparsable value gives zero, and so does a
-// maxDelay of zero or less.
+// of now. An input longer than 128 bytes, a reset at or before now, a signed number or an unparsable
+// value gives zero, and so does a maxDelay of zero or less.
 func ParseReset(v string, now time.Time, maxDelay time.Duration) time.Duration {
-	if maxDelay <= 0 {
+	if maxDelay <= 0 || len(v) > maxValueLen {
 		return 0
 	}
 	reset, ok := digits(strings.TrimSpace(v))
@@ -115,7 +124,7 @@ func Header(h http.Header, now time.Time, maxDelay time.Duration) time.Duration 
 	if d, ok := parse(h.Get("Retry-After"), now, maxDelay); ok {
 		return d
 	}
-	if strings.TrimSpace(h.Get("X-RateLimit-Remaining")) == "0" {
+	if rem := h.Get("X-RateLimit-Remaining"); len(rem) <= maxValueLen && strings.TrimSpace(rem) == "0" {
 		return ParseReset(h.Get("X-RateLimit-Reset"), now, maxDelay)
 	}
 	return 0

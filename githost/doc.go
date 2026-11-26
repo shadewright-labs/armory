@@ -1,14 +1,19 @@
 // Package githost holds the host-neutral types of a client for one repository on a Git host.
 //
-// A client is bound to one repository ([RepoRef]) when it is built. It holds no credential and decides
-// nothing about what a caller may do: the product supplies a [Credential], which hands out a [Token] for
-// each attempt of a request.
+// A client is bound to one repository ([RepoRef]) when it is built. It stores no token and decides
+// nothing about what a caller may do: the product supplies a [Credential], which the client calls for
+// a [Token] before each attempt of a request and drops once the attempt finishes.
 //
 // A [Token] never prints, formats or marshals its value: it emits a fixed placeholder with every fmt
-// verb except %T (which shows the type name) and %p on a pointer (which shows the address), and with
-// JSON and text marshalers (gob refuses it as having no exported fields). Nothing exported returns its
-// value: only the module's own transport writes it into a request header, after checking the request
-// against the one https origin the client is pinned to.
+// verb except %T (which shows the type name) and %p (which shows the address on a pointer or a fmt
+// type mismatch on a value, without calling Format), and with JSON and text marshalers (gob refuses it
+// as having no exported fields). Nothing exported returns its value: only the module's own transport
+// writes it into a request header, after checking the request against the one https origin the client
+// is pinned to. This package and its transport never write a token to any log, error or trace. What
+// the package cannot control is Go's standard HTTP/1.1 client logger: when a host sends unsolicited
+// bytes after a response on a kept-alive connection, net/http logs a prefix of those peer bytes
+// through the process's default logger. Those bytes come only from the host, not from what the client
+// sent, unless the host itself echoed them back.
 //
 // Errors are the sentinels of this package, matched with [errors.Is], and three types for [errors.As]:
 // [*Error] carries an operation label, an HTTP status and a kind, [*RetryableError] a transient failure
@@ -24,6 +29,7 @@
 //
 // This package holds types only. It has no Reader or Writer interface, no host client and no exported
 // write check yet: those are still being designed. It does not read files, environment variables or
-// secret stores, does not log, and has no third-party dependencies. Which repository, which branches,
-// which approvals and which audit records apply are the product's decisions.
+// secret stores, does not log itself (see the standard library's idle-connection limit above), and has
+// no third-party dependencies. Which repository, which branches, which approvals and which audit
+// records apply are the product's decisions.
 package githost

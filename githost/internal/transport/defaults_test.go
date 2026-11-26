@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -34,7 +35,7 @@ func defaultTransport(t *testing.T, c *Client) *http.Transport {
 
 // TestDefaultTransport: with no RoundTripper, the client requires TLS 1.2, bounds dial, handshake, the
 // wait for headers and their size, bounds each attempt, follows no redirect, speaks HTTP/1.1 only, asks
-// for no compression, has no TLS dial hook, and takes its proxy from the environment.
+// for no compression, has no TLS dial hook, and uses no proxy by default.
 func TestDefaultTransport(t *testing.T) {
 	c, err := New(Config{Host: apiHost, Credential: githost.CredentialFunc(
 		func(context.Context, githost.Scope) (githost.Token, error) { return githost.Token{}, nil })})
@@ -99,102 +100,249 @@ func assertDefaultHooksAndProxy(t *testing.T, tr *http.Transport) {
 	if tr.DialTLS != nil { //nolint:staticcheck // the test asserts the deprecated hook is unset
 		t.Error("DialTLS is set")
 	}
-	if tr.Proxy == nil ||
-		reflect.ValueOf(tr.Proxy).Pointer() != reflect.ValueOf(http.ProxyFromEnvironment).Pointer() {
-		t.Error("proxy is not taken from the environment")
+	if tr.Proxy != nil {
+		t.Error("default transport has a proxy configured; want nil")
 	}
 }
 
-// TestProxyNeverSeesTheToken: through a proxy, an https request goes in a CONNECT tunnel. The proxy sees
-// the host and port, and Proxy-Authorization when its URL has a user, but never the Authorization header:
-// that travels inside TLS to the host.
+// TestProxyNeverSeesTheToken: through an opt-in Config.Proxy, an https request goes in a CONNECT tunnel.
+// The proxy sees the host and port, and Proxy-Authorization when authenticated over an https proxy, but
+// never the Authorization header: that travels inside TLS to the host.
 func TestProxyNeverSeesTheToken(t *testing.T) {
-	var (
-		gotAuth string
-		mu      sync.Mutex
-		methods []string
-		headers []http.Header
-		targets []string
-	)
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		gotAuth = r.Header.Get("Authorization")
-		mu.Unlock()
-		okBody(w)
-	}))
-	t.Cleanup(srv.Close)
-	host := srv.Listener.Addr().String()
+	for _, authenticated := range []bool{false, true} {
+		name := "http proxy without auth"
+		if authenticated {
+			name = "https proxy with auth"
+		}
+		t.Run(name, func(t *testing.T) {
+			var (
+				gotAuth string
+				mu      sync.Mutex
+				methods []string
+				headers []http.Header
+				targets []string
+			)
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				gotAuth = r.Header.Get("Authorization")
+				mu.Unlock()
+				okBody(w)
+			}))
+			t.Cleanup(srv.Close)
+			host := srv.Listener.Addr().String()
 
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			proxyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				methods = append(methods, r.Method)
+				headers = append(headers, r.Header.Clone())
+				targets = append(targets, r.Host)
+				mu.Unlock()
+				if r.Method != http.MethodConnect {
+					http.Error(w, "CONNECT only", http.StatusMethodNotAllowed)
+					return
+				}
+				// The tunnel goes only to the test server, whatever the request names; the target is checked below.
+				up, err := (&net.Dialer{}).DialContext(r.Context(), "tcp", host)
+				if err != nil {
+					http.Error(w, "dial", http.StatusBadGateway)
+					return
+				}
+				down, _, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					_ = up.Close()
+					return
+				}
+				_, _ = io.WriteString(down, "HTTP/1.1 200 Connection established\r\n\r\n")
+				go func() { _, _ = io.Copy(up, down); _ = up.Close() }()
+				go func() { _, _ = io.Copy(down, up); _ = down.Close() }()
+			})
+			var proxy *httptest.Server
+			if authenticated {
+				proxy = httptest.NewTLSServer(proxyHandler)
+			} else {
+				proxy = httptest.NewServer(proxyHandler)
+			}
+			t.Cleanup(proxy.Close)
+
+			pu, err := url.Parse(proxy.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if authenticated {
+				pu.User = url.UserPassword("proxyuser", strings.Join([]string{"proxy", "pass", "7e1a"}, "-"))
+			}
+
+			c, err := New(Config{
+				Host:  host,
+				Proxy: http.ProxyURL(pu),
+				Credential: githost.CredentialFunc(
+					func(context.Context, githost.Scope) (githost.Token, error) {
+						return githost.NewToken(githost.Bearer, tokenCanary, time.Time{}), nil
+					}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := defaultTransport(t, c)
+			t.Cleanup(tr.CloseIdleConnections)
+			pool := x509.NewCertPool()
+			pool.AddCert(srv.Certificate())
+			if authenticated {
+				pool.AddCert(proxy.Certificate())
+			}
+			tr.TLSClientConfig.RootCAs = pool
+
+			if _, err := c.Do(t.Context(), get()); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if gotAuth != "Bearer "+tokenCanary {
+				t.Errorf("host got Authorization %q", gotAuth)
+			}
+			if !reflect.DeepEqual(methods, []string{http.MethodConnect}) || !reflect.DeepEqual(targets, []string{host}) {
+				t.Fatalf("proxy saw %v to %v, want one CONNECT to the host", methods, targets)
+			}
+			h := headers[0]
+			if authenticated && h.Get("Proxy-Authorization") == "" {
+				t.Error("an authenticated https proxy got no Proxy-Authorization")
+			}
+			if _, ok := h["Authorization"]; ok {
+				t.Error("the proxy got an Authorization header")
+			}
+			for k, vs := range h {
+				for _, v := range vs {
+					if strings.Contains(v, tokenCanary) {
+						t.Errorf("the proxy got the token in %s", k)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestProxyCleartextUserinfoRefused: a non-https proxy URL with userinfo is refused with ErrRejected
+// before any connection is opened, and its credentials never appear in the error.
+func TestProxyCleartextUserinfoRefused(t *testing.T) {
+	proxyPass := strings.Join([]string{"proxy", "secret", "4d9c"}, "-")
+	var (
+		mu   sync.Mutex
+		hits int
+	)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
-		methods = append(methods, r.Method)
-		headers = append(headers, r.Header.Clone())
-		targets = append(targets, r.Host)
+		hits++
 		mu.Unlock()
-		if r.Method != http.MethodConnect {
-			http.Error(w, "CONNECT only", http.StatusMethodNotAllowed)
-			return
-		}
-		// The tunnel goes only to the test server, whatever the request names; the target is checked below.
-		up, err := (&net.Dialer{}).DialContext(r.Context(), "tcp", host)
-		if err != nil {
-			http.Error(w, "dial", http.StatusBadGateway)
-			return
-		}
-		down, _, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			_ = up.Close()
-			return
-		}
-		_, _ = io.WriteString(down, "HTTP/1.1 200 Connection established\r\n\r\n")
-		go func() { _, _ = io.Copy(up, down); _ = up.Close() }()
-		go func() { _, _ = io.Copy(down, up); _ = down.Close() }()
+		http.Error(w, "unexpected", http.StatusBadGateway)
 	}))
 	t.Cleanup(proxy.Close)
 
-	c, err := New(Config{Host: host, Credential: githost.CredentialFunc(
-		func(context.Context, githost.Scope) (githost.Token, error) {
-			return githost.NewToken(githost.Bearer, tokenCanary, time.Time{}), nil
-		})})
+	pu, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pu.User = url.UserPassword("proxyuser", proxyPass)
+
+	socksURL := &url.URL{
+		Scheme: "socks5",
+		User:   url.UserPassword("proxyuser", proxyPass),
+		Host:   proxy.Listener.Addr().String(),
+	}
+
+	cases := []struct {
+		name  string
+		proxy func(*http.Request) (*url.URL, error)
+		req   Request
+	}{
+		{"http proxy with userinfo on GET", http.ProxyURL(pu), get()},
+		{"http proxy with userinfo on POST", http.ProxyURL(pu), post(false)},
+		{"socks5 proxy with userinfo on GET", http.ProxyURL(socksURL), get()},
+		{"env proxy with http userinfo", http.ProxyFromEnvironment, get()},
+	}
+	t.Setenv("HTTPS_PROXY", pu.String())
+	t.Setenv("NO_PROXY", "")
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := New(Config{
+				Host:        apiHost,
+				Proxy:       tc.proxy,
+				Credential:  tokenCred(tokenCanary),
+				WriteCheck:  func(context.Context, Send) error { return nil },
+				MaxAttempts: 2,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := defaultTransport(t, c)
+			t.Cleanup(tr.CloseIdleConnections)
+
+			r := tc.req
+			r.Path, r.Template, r.Query = "/x", "/x", nil
+			_, err = c.Do(t.Context(), r)
+			if !errors.Is(err, githost.ErrRejected) {
+				t.Fatalf("Do = %v, want ErrRejected", err)
+			}
+			if errors.Is(err, githost.ErrRetryable) || errors.Is(err, githost.ErrOutcomeUnknown) {
+				t.Errorf("Do = %v, must not be retryable or ErrOutcomeUnknown", err)
+			}
+			for _, bad := range []string{"proxyuser", proxyPass, proxy.Listener.Addr().String()} {
+				if strings.Contains(err.Error(), bad) {
+					t.Errorf("error %q leaks %q", err, bad)
+				}
+			}
+		})
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 0 {
+		t.Fatalf("proxy saw %d connection(s), want 0", hits)
+	}
+}
+
+// TestDefaultTransportIgnoresEnvProxy: with no Proxy configured, the default transport ignores
+// HTTPS_PROXY in the process environment and opens no connection to it.
+func TestDefaultTransportIgnoresEnvProxy(t *testing.T) {
+	var proxyHits sync.Mutex
+	var hits int
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxyHits.Lock()
+		hits++
+		proxyHits.Unlock()
+		http.Error(w, "unexpected", http.StatusBadGateway)
+	}))
+	t.Cleanup(proxy.Close)
+	proxyAddr := proxy.Listener.Addr().String()
+
+	t.Setenv("HTTPS_PROXY", proxy.URL)
+	t.Setenv("https_proxy", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+
+	c, err := New(Config{
+		Host:        apiHost,
+		Credential:  tokenCred(tokenCanary),
+		MaxAttempts: 1,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	tr := defaultTransport(t, c)
 	t.Cleanup(tr.CloseIdleConnections)
-	pool := x509.NewCertPool()
-	pool.AddCert(srv.Certificate())
-	tr.TLSClientConfig.RootCAs = pool
-	// The environment's proxy settings skip loopback, so the test points the transport at its proxy.
-	pu, err := url.Parse(proxy.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pu.User = url.UserPassword("proxyuser", strings.ToLower(pathCanary))
-	tr.Proxy = http.ProxyURL(pu)
-
-	if _, err := c.Do(t.Context(), get()); err != nil {
-		t.Fatal(err)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if gotAuth != "Bearer "+tokenCanary {
-		t.Errorf("host got Authorization %q", gotAuth)
-	}
-	if !reflect.DeepEqual(methods, []string{http.MethodConnect}) || !reflect.DeepEqual(targets, []string{host}) {
-		t.Fatalf("proxy saw %v to %v, want one CONNECT to the host", methods, targets)
-	}
-	h := headers[0]
-	if h.Get("Proxy-Authorization") == "" {
-		t.Error("an authenticated proxy got no Proxy-Authorization")
-	}
-	if _, ok := h["Authorization"]; ok {
-		t.Error("the proxy got an Authorization header")
-	}
-	for k, vs := range h {
-		for _, v := range vs {
-			if strings.Contains(v, tokenCanary) {
-				t.Errorf("the proxy got the token in %s", k)
-			}
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if addr == proxyAddr {
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
 		}
+		return nil, net.ErrClosed
+	}
+
+	r := get()
+	r.Path, r.Template, r.Query = "/x", "/x", nil
+	_, _ = c.Do(t.Context(), r)
+
+	proxyHits.Lock()
+	defer proxyHits.Unlock()
+	if hits != 0 {
+		t.Fatalf("proxy saw %d connection(s) from HTTPS_PROXY, want 0", hits)
 	}
 }

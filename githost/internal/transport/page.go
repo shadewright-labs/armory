@@ -112,9 +112,13 @@ const (
 // An unbalanced bracket or quote in a Link header, a link off the pinned origin, a second rel="next"
 // link, a missing, repeated or malformed page number (only 1 to maxPage, in decimal without sign or
 // leading zero), or a page that is not the current one plus one (a skip, a repeat or a step back, so no
-// sequence of pages can cycle) is githost.ErrUntrustedAnswer. A request whose own page number is
-// repeated or malformed is githost.ErrRejected.
+// sequence of pages can cycle) is githost.ErrUntrustedAnswer. A request whose operation label is not a
+// valid label, or whose own page number is repeated or malformed, is githost.ErrRejected; an invalid
+// operation label is replaced with a fixed one.
 func (c *Client) NextPage(r Request, h http.Header) (next Request, ok bool, err error) {
+	if !validOp(r.Op) {
+		return Request{}, false, &githost.Error{Op: opDo, Kind: githost.ErrRejected}
+	}
 	current := 1
 	if vs, has := r.Query[pageParam]; has {
 		n, valid := 0, len(vs) == 1

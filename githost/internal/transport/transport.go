@@ -19,8 +19,9 @@
 //   - never follows a redirect, and drops the Location header of a 3xx below the HTTP client, so a
 //     malformed one cannot hide the status. A 3xx answer to a read is an error with its status; a 3xx
 //     answer to a write also matches githost.ErrOutcomeUnknown, because a host may answer a write it
-//     carried out with one (303 after a POST). A 304 is an answer only to a GET or HEAD that carried
-//     If-None-Match or If-Modified-Since, and an error otherwise;
+//     carried out with one (303 after a POST). Blank or syntactically invalid If-None-Match values and
+//     unparsable If-Modified-Since dates are refused with githost.ErrRejected before any send; a 304 is
+//     accepted only for a GET or HEAD that sent a valid validator, and is an error otherwise;
 //   - asks for the identity encoding and reads every 2xx body, except a HEAD answer's, with a bound the
 //     caller sets, counted in bytes as they arrive; it refuses a declared length over the bound before
 //     reading and returns githost.ErrTooLarge past it. A 2xx answer to a write whose body cannot be read
@@ -62,9 +63,12 @@
 // What sees the request after the token is set: the http.Client this package builds (its redirect
 // policy only returns the last answer and never sees a token-bearing request of its own), the default
 // transport or Config.RoundTripper, and nothing else. The Credential, the write check, the Observer,
-// Jitter, Now and Sleep never get the request. Errors of net/http (a *url.Error holds the method and URL,
-// not the headers) are replaced, never wrapped. No code of this package formats a request, so a panic,
-// in a callback or below, prints no header value.
+// Jitter, Now and Sleep never get the request. Errors of net/http (a *url.Error holds the method and
+// URL, not the headers) are replaced, never wrapped. No code of this package formats a request, so a
+// panic, in a callback or below, prints no header value. This package never writes a token to any log,
+// error or trace. What it cannot control is Go's HTTP/1.1 client logging unsolicited bytes a host
+// sends on an idle kept-alive connection through the process's default logger: those are peer bytes,
+// not bytes the client sent, unless the host echoed them back.
 package transport
 
 import (
@@ -170,8 +174,8 @@ type Config struct {
 	// Observer, when set, gets one Event per attempt.
 	Observer Observer
 	// Header holds fixed headers sent with every request, such as an API version. Authorization,
-	// Idempotency-Key, X-Idempotency-Key and Accept-Encoding are refused, and so is a name or value Go
-	// would refuse to send.
+	// Proxy-Authorization, Idempotency-Key, X-Idempotency-Key and Accept-Encoding are refused, and so
+	// is a name or value Go would refuse to send.
 	Header http.Header
 	// UserAgent is sent with every request; empty means "armory-githost". A value Go would refuse to send
 	// is refused.
@@ -184,6 +188,22 @@ type Config struct {
 	Timeout        time.Duration // one call of Do, retries included; DefaultTimeout
 	AttemptTimeout time.Duration // one attempt, body read included; DefaultAttemptTimeout
 	BodyLimit      int64         // default bound of a 2xx body, in bytes as they arrive; DefaultBodyLimit
+
+	// Proxy selects the proxy for requests sent through the default HTTP transport. Nil (the default)
+	// uses no proxy and ignores the process environment (HTTPS_PROXY, NO_PROXY). Proxy use is opt-in: a
+	// caller that needs a proxy sets this explicitly (for example, http.ProxyFromEnvironment). Ignored
+	// when RoundTripper is set.
+	//
+	// A proxy learns the pinned host and port, the timing and size of each exchange, and may resolve the
+	// origin host name itself. For an HTTP proxy, Go opens a CONNECT tunnel so the Authorization header
+	// travels inside TLS to the pinned host; Go also accepts SOCKS proxies (socks5, socks5h), where TLS
+	// to the pinned host still protects the header. Confidentiality against the proxy depends on the
+	// host certificate trust store, including any trusted TLS-inspection CA.
+	//
+	// If Proxy returns a URL whose scheme is not "https" and which carries userinfo, the request fails
+	// before any connection is opened with githost.ErrRejected: proxy credentials must not travel in
+	// clear text.
+	Proxy func(*http.Request) (*url.URL, error)
 
 	// RoundTripper replaces the default HTTP transport; tests use it to trust a loopback server's
 	// certificate. Only code of this module sets it; no exported API passes one through.
@@ -238,8 +258,11 @@ type Request struct {
 	Body        []byte
 	ContentType string // sent when Body is set; empty means application/json
 	Accept      string
-	IfNoneMatch string // sent as If-None-Match; for GET and HEAD, a 304 comes back as a Response
-	Limit       int64  // bound of the 2xx body in bytes; zero or less means the client's default
+	// IfNoneMatch is sent as If-None-Match. When set it must be "*" or a comma-separated list of
+	// optionally weak quoted entity-tags; otherwise Do refuses the request with githost.ErrRejected
+	// before sending. For GET and HEAD, a 304 comes back as a Response.
+	IfNoneMatch string
+	Limit       int64 // bound of the 2xx body in bytes; zero or less means the client's default
 	// Idempotent marks a write that may be sent again in the call, such as a content-addressed object or a
 	// ref move with an expected old value. Reads are always retried; a write without it is sent once.
 	Idempotent bool
@@ -288,9 +311,10 @@ func New(cfg Config) (*Client, error) {
 	}
 	for k, vs := range cfg.Header {
 		switch http.CanonicalHeaderKey(k) {
-		case "Authorization", "Idempotency-Key", "X-Idempotency-Key", "Accept-Encoding":
-			// The token is set per attempt only; an idempotency key would let Go's transport resend a
-			// bodiless write the host may have read, below the write check; the encoding is always identity.
+		case "Authorization", "Proxy-Authorization", "Idempotency-Key", "X-Idempotency-Key", "Accept-Encoding":
+			// The token is set per attempt only; Proxy-Authorization must not be sent to the origin host;
+			// an idempotency key would let Go's transport resend a bodiless write the host may have read,
+			// below the write check; the encoding is always identity.
 			return nil, invalid
 		}
 		if !validFieldName(k) {
@@ -333,7 +357,7 @@ func New(cfg Config) (*Client, error) {
 	if c.sleep == nil {
 		c.sleep = sleep
 	}
-	c.httpClient = newHTTPClient(cfg.RoundTripper, cfg.Host)
+	c.httpClient = newHTTPClient(cfg.RoundTripper, cfg.Host, cfg.Proxy)
 	return c, nil
 }
 
@@ -395,9 +419,9 @@ var dialer = net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, 
 // newHTTPClient never follows a redirect (Go keeps the Authorization header on some), and checks the
 // origin again below the client, in case anything below Do builds a request of its own. The attempt
 // timeout is not the client's: Do sets it on each attempt's context, so it covers the body read too.
-func newHTTPClient(rt http.RoundTripper, host string) *http.Client {
+func newHTTPClient(rt http.RoundTripper, host string, proxy func(*http.Request) (*url.URL, error)) *http.Client {
 	if rt == nil {
-		rt = newTransport()
+		rt = newTransport(proxy)
 	}
 	return &http.Client{
 		Transport: pinned{host: host, next: rt},
@@ -421,17 +445,23 @@ func newHTTPClient(rt http.RoundTripper, host string) *http.Client {
 // It does not ask for or undo a compression: Do asks for the identity encoding, and the body bound
 // counts the bytes as they arrive.
 //
-// It keeps Go's proxy settings from the environment (HTTPS_PROXY, NO_PROXY), so a client works behind
-// an egress proxy. A proxy then learns the pinned host and port, the time and size of each exchange,
-// and, when its URL holds a user, gets that user's Proxy-Authorization on each CONNECT. It never gets
-// the Authorization header: every request is https, which Go sends through a CONNECT tunnel, and the
-// header travels inside TLS to the host, whose certificate is verified as without a proxy. Who may set
-// the environment of the process is therefore who may choose a proxy.
-func newTransport() *http.Transport {
+// By default Proxy is nil, so the transport uses no proxy and ignores the process environment
+// (HTTPS_PROXY, NO_PROXY). Proxy use is opt-in through Config.Proxy. When set, the proxy function is
+// wrapped to refuse any non-https proxy URL that carries userinfo before a connection is opened. A
+// proxy learns the pinned host and port, the timing and size of each exchange, and may resolve the
+// origin host name itself. With an HTTP proxy, Go opens a CONNECT tunnel so the Authorization header
+// travels inside TLS to the pinned host; Go also accepts SOCKS proxies (socks5, socks5h), where TLS to
+// the pinned host still protects the header. Confidentiality against the proxy depends on the host
+// certificate trust store, including any trusted TLS-inspection CA.
+func newTransport(proxy func(*http.Request) (*url.URL, error)) *http.Transport {
 	var protocols http.Protocols
 	protocols.SetHTTP1(true)
+	var p func(*http.Request) (*url.URL, error)
+	if proxy != nil {
+		p = checkedProxy(proxy)
+	}
 	return &http.Transport{
-		Proxy:                  http.ProxyFromEnvironment,
+		Proxy:                  p,
 		DialContext:            dialer.DialContext,
 		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}},
 		TLSHandshakeTimeout:    10 * time.Second,
@@ -443,6 +473,24 @@ func newTransport() *http.Transport {
 		ResponseHeaderTimeout:  30 * time.Second,
 		ExpectContinueTimeout:  time.Second,
 		MaxResponseHeaderBytes: maxHeaderBytes,
+	}
+}
+
+// errCleartextProxyAuth is returned by checkedProxy when a non-https proxy URL carries userinfo. It
+// never reaches a caller as is.
+var errCleartextProxyAuth = errors.New("proxy credential requires https proxy")
+
+// checkedProxy wraps fn and refuses any non-https proxy URL with userinfo before a connection is opened.
+func checkedProxy(fn func(*http.Request) (*url.URL, error)) func(*http.Request) (*url.URL, error) {
+	return func(req *http.Request) (*url.URL, error) {
+		u, err := fn(req)
+		if err != nil || u == nil {
+			return u, err
+		}
+		if !strings.EqualFold(u.Scheme, "https") && u.User != nil {
+			return nil, errCleartextProxyAuth
+		}
+		return u, nil
 	}
 }
 
@@ -517,7 +565,8 @@ func isWrite(method string) bool { return method != http.MethodGet && method != 
 func success(status int) bool { return status >= 200 && status <= 299 }
 
 // buildURL makes the URL of r on the pinned origin and refuses anything else: an operation label that
-// is not a fixed label, a method outside the set, a header value Go would refuse to send, a path that
+// is not a fixed label, a method outside the set, a header value Go would refuse to send, a blank or
+// malformed If-None-Match value, an If-Modified-Since value that http.ParseTime rejects, a path that
 // does not start with one slash, holds a query, a fragment or a backslash, would name another host, is
 // not sent as given, holds an encoded slash or backslash or a dot segment, or that the template does
 // not name.
@@ -533,6 +582,21 @@ func (c *Client) buildURL(r Request) (*url.URL, error) {
 	}
 	if !validFieldValue(r.Accept) || !validFieldValue(r.IfNoneMatch) || !validFieldValue(r.ContentType) {
 		return nil, rejected
+	}
+	if r.IfNoneMatch != "" && !validIfNoneMatch(r.IfNoneMatch) {
+		return nil, rejected
+	}
+	if r.IfNoneMatch == "" {
+		for _, v := range c.header.Values("If-None-Match") {
+			if !validIfNoneMatch(v) {
+				return nil, rejected
+			}
+		}
+	}
+	if ims := c.header.Values("If-Modified-Since"); len(ims) > 0 {
+		if len(ims) != 1 || !validIfModifiedSince(ims[0]) {
+			return nil, rejected
+		}
 	}
 	if !strings.HasPrefix(r.Path, "/") || strings.HasPrefix(r.Path, "//") ||
 		strings.ContainsAny(r.Path, "?#\\") || !cleanSegments(r.Path) || !r.Template.names(r.Path) {
@@ -604,8 +668,9 @@ func (c *Client) once(ctx context.Context, r Request, u *url.URL, attempt int) (
 }
 
 // send is the one place a request leaves the process. The origin is checked before the token is set;
-// every header is checked before the write check, and the write check is the last step before the
-// request is handed to the HTTP client. ctx is the call's context and actx the attempt's, which the
+// every header is checked before the write check, and the write check is followed by a check of the
+// call and attempt contexts before the request is handed to the HTTP client, so an attempt that timed
+// out during the check fails before send. ctx is the call's context and actx the attempt's, which the
 // request carries as a [wireContext]; stop ends the attempt's.
 func (c *Client) send(
 	ctx, actx context.Context, stop context.CancelFunc, r Request, req *http.Request, tok githost.Token, attempt int,
@@ -646,6 +711,12 @@ func (c *Client) send(
 			return Response{}, false, refusedError(r.Op, err)
 		}
 	}
+	if ctx.Err() != nil {
+		return Response{}, false, ctxError(r.Op, ctx)
+	}
+	if actx.Err() != nil {
+		return Response{}, false, &githost.RetryableError{Err: fixed(r.Op, "request timed out")}
+	}
 
 	start := time.Now()
 	resp, err := c.httpClient.Do(req)
@@ -653,7 +724,8 @@ func (c *Client) send(
 		stop()
 		c.emit(r, 0, attempt, time.Since(start))
 		// The error of http.Client.Do holds the URL and possibly answer text: it is replaced, never wrapped.
-		return Response{}, !errors.Is(err, errOffOrigin), c.transportError(ctx, r.Op, err)
+		preSend := errors.Is(err, errOffOrigin) || errors.Is(err, errCleartextProxyAuth)
+		return Response{}, !preSend, c.transportError(ctx, r.Op, err)
 	}
 	out, sent, err := c.answer(ctx, actx, r, req, resp)
 	_ = resp.Body.Close()
@@ -736,8 +808,7 @@ func (c *Client) classify(r Request, req *http.Request, resp *http.Response) (Re
 	code := resp.StatusCode
 	write := isWrite(r.Method)
 	switch {
-	case code == http.StatusNotModified && !write &&
-		(req.Header.Get("If-None-Match") != "" || req.Header.Get("If-Modified-Since") != ""):
+	case code == http.StatusNotModified && !write && hasValidCondition(req.Header):
 		return Response{Status: code, Header: resp.Header}, false, nil
 	case code >= 300 && code <= 399:
 		// A redirect is never followed, so its answer is an error, whatever Location it named. A host may

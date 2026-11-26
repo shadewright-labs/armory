@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -9,7 +10,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -326,4 +329,88 @@ func TestNoProcessWideHTTPState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestIdleChannelUnsolicitedPeerBytesLogged establishes what Go's HTTP/1.1 client logs through the
+// standard logger when a server writes extra bytes after a response on a kept-alive connection: it logs
+// a prefix of the peer bytes, and nothing the client sent.
+func TestIdleChannelUnsolicitedPeerBytesLogged(t *testing.T) {
+	var logs syncBuffer
+	origOut := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(origOut) })
+
+	const peerNoise = "PEER-UNSOLICITED-DATA-7c21"
+	sentToken := strings.Join([]string{"idle", "chan", "tok", "9f4b"}, "-")
+	sendExtra := make(chan struct{})
+	extraDone := make(chan struct{})
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, rw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+			close(extraDone)
+		}()
+		const payload = `{"idle":true}`
+		_, _ = fmt.Fprintf(rw, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(payload), payload)
+		_ = rw.Flush()
+		<-sendExtra
+		_, _ = io.WriteString(rw, peerNoise+"\r\n")
+		_ = rw.Flush()
+	}))
+	t.Cleanup(srv.Close)
+
+	c := defaultClientFor(t, srv, func(cfg *Config) { cfg.Credential = tokenCred(sentToken) })
+	tr := defaultTransport(t, c)
+	r := get()
+	r.Path, r.Template, r.Query = "/x", "/x", nil
+	resp, err := c.Do(t.Context(), r)
+	if err != nil || string(resp.Body) != `{"idle":true}` {
+		close(sendExtra)
+		t.Fatalf("Do = %q, %v", resp.Body, err)
+	}
+	close(sendExtra)
+	<-extraDone
+
+	deadline := time.Now().Add(2 * time.Second)
+	var logged string
+	for time.Now().Before(deadline) {
+		logged = logs.String()
+		if strings.Contains(logged, "Unsolicited response received on idle HTTP channel") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	tr.CloseIdleConnections()
+	if !strings.Contains(logged, "Unsolicited response received on idle HTTP channel") {
+		t.Fatalf("standard logger did not record the idle-channel message; got %q", logged)
+	}
+	if !strings.Contains(logged, peerNoise) {
+		t.Errorf("standard logger did not include the peer bytes; got %q", logged)
+	}
+	if strings.Contains(logged, sentToken) {
+		t.Errorf("standard logger contains the client token: %q", logged)
+	}
+	t.Logf("captured idle-channel log: %q", strings.TrimSpace(logged))
 }
