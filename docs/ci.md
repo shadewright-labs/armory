@@ -25,7 +25,7 @@ The groups call these workflows:
 
 Three jobs run on every pull request, whatever changed:
 
-- `repo-checks.yml`: `python3 -I hack/docs-links.py check`, which follows the relative links and heading fragments of the tracked Markdown files and fails on a missing target (pages not written yet can be listed in `hack/docs-pages-pending.txt`), then the offline tests under `hack/test/`: the changed-files detector, the `ci-ok` predicate, the fuzz target list, the link checker, the built docs site checker and `workflows_test.sh`. The last one checks that every remote action is pinned to a full commit SHA, that every workflow but `pr-title.yml` starts with `permissions: {}`, that every checkout sets `persist-credentials: false`, that every download in `hack/` is checked against a sha256, the shape of the coverage upload, the condition of `vulncheck.yml` and that both fuzz runs take their targets from `hack/fuzz-targets.sh`.
+- `repo-checks.yml`: `python3 -I hack/docs-links.py check`, which follows the relative links and heading fragments of the tracked Markdown files and fails on a missing target (pages not written yet can be listed in `hack/docs-pages-pending.txt`), then the offline tests under `hack/test/`: the changed-files detector, the `ci-ok` predicate, the fuzz target list, the link checker, the built docs site checker, the main-ancestry tag check and `workflows_test.sh`. The last one checks that every remote action is pinned to a full commit SHA, that every workflow but `pr-title.yml` starts with `permissions: {}`, that every checkout sets `persist-credentials: false`, that every download in `hack/` is checked against a sha256, the shape of the coverage upload, the condition of `vulncheck.yml` and that both fuzz runs take their targets from `hack/fuzz-targets.sh`.
 - `workflow-lint.yml`: actionlint 1.7.12 (download checked against its sha256), shellcheck over `hack/*.sh` and `hack/test/*.sh`, and zizmor over `.github/workflows`, installed with `pip --require-hashes` from `hack/zizmor-requirements.txt`.
 - `secret-scan.yml`: gitleaks 8.30.1 (installed by `hack/install-gitleaks.sh`, checked against its sha256) with the default rules and `.gitleaks.toml`, over every ref and the full history (`fetch-depth: 0`), including changes that only a merge commit introduces. The scan command is `hack/secret-scan.sh`, which fails closed when the history cannot be read: it compares the commits gitleaks reports as scanned with the commits `git` lists, and records the exit status of each `git log` gitleaks starts. `.gitleaks.toml` has no allowlist, because the history has no finding.
 
@@ -63,11 +63,35 @@ Publishing requires GitHub Pages to be enabled in the repository settings with "
 
 ## Releases
 
-Armory is published as Go source. A release is a tag `vX.Y.Z` on a commit of `main`; the Go module proxy builds the module zip from the tag and the checksum database records its hash, so every caller downloads the same bytes. There is no release workflow, no binary and no image. Creating `v*` tags should be limited to repository admins by a tag ruleset, as in the product repositories, and a published tag is never moved or deleted.
+Armory is published as Go source through the Go module proxy (`proxy.golang.org`) and the Go checksum database (`sum.golang.org`). There are no binaries and no container images.
 
-Provenance for a source-only module can take two forms, and neither is in place yet:
+Releases follow the same mechanism as Shadewright:
 
-- A signed annotated tag (`git tag -s vX.Y.Z`), which GitHub shows as verified. It proves who made the tag, and the checksum database already proves the zip has not changed since.
-- An attestation of the module zip: a workflow on the tag builds the zip with `go mod download -json` (or `golang.org/x/mod/zip`), checks its hash against `sum.golang.org` and attests it with `actions/attest-build-provenance`. This gives SLSA build provenance for the source archive and lets the Scorecard Signed-Releases check pass if the zip is also attached to a GitHub release.
+- `release-please.yml` runs on pushes to `main` inside the `release` environment (which accepts deployments from `main` only). It mints a short-lived token for the `shadewright-release` GitHub App from `RELEASE_APP_CLIENT_ID` (variable) and `RELEASE_APP_PRIVATE_KEY` (secret), then runs `googleapis/release-please-action` against `release-please-config.json` and `.release-please-manifest.json`. Using the App token lets the release pull request trigger required checks and lets the resulting tag push trigger the provenance workflow.
+- Conventional Commits on `main` determine the next version: `feat` bumps the minor version, `fix` and `perf` bump the patch version, and `!` or a `BREAKING CHANGE:` footer bumps the minor version while Armory is on `0.x` (`bump-minor-pre-major: true`, `bump-patch-for-minor-pre-major: false`). `revert` appears in the changelog; `refactor`, `test`, `docs`, `build`, `ci` and `chore` stay out of it.
+- The workflow keeps one release pull request open (`chore: release X.Y.Z`). A maintainer merges it when the changes for that version are ready. Merging it updates `CHANGELOG.md` and `.release-please-manifest.json`, creates a plain `vX.Y.Z` tag on `main` (`include-component-in-tag: false`, `force-tag-creation: true`) and creates a **draft** GitHub release (`draft: true`). Never create a plain `vX.Y.Z` tag by hand, and never edit `CHANGELOG.md` or `.release-please-manifest.json` outside that pull request.
+- `release-provenance.yml` runs on every `v*` tag push and splits permissions across three jobs. Pre-release tags (`vX.Y.Z-...`) are skipped at the first step with a notice (exit 0) because `release-please` does not create releases for them:
+  - `fetch` (`contents: read`): verifies that the tag points at a commit on `main` (`hack/require-on-main.sh`), then downloads `github.com/shadewright-labs/armory@<tag>` from `https://proxy.golang.org` (without `,direct`) with `go mod download -json` in a clean directory. Both `go` invocations run with `GOENV=off`, `GOSUMDB=sum.golang.org`, `GOPROXY=https://proxy.golang.org`, `GOVCS` unset, and `GOPRIVATE`, `GONOSUMDB`, `GONOPROXY`, `GOINSECURE` and `GOFLAGS` cleared. A `SECURITY ERROR` checksum mismatch aborts immediately; only not-found (`404`/`410`) answers are retried (up to 20 times over five minutes). The job requires `Origin.Hash` and `Origin.Ref` in the proxy metadata to match the checked-out tag commit and `refs/tags/<tag>`, checks the cached ziphash, writes `armory-<tag>.zip` and `armory-<tag>.zip.sha256`, exports the zip's `sha256` and `h1` hash as job outputs, and uploads the `module-zip` artifact with `overwrite: true` and 7-day retention.
+  - `attest` (`contents: read`, `id-token: write`, `attestations: write` on this job only): recomputes the downloaded zip's `sha256` and `h1` dirhash and compares both against `needs.fetch.outputs` (not only against the `.sha256` file inside the artifact), attests the zip with `actions/attest-build-provenance`, and verifies the attestation immediately with `gh attestation verify` against `shadewright-labs/armory/.github/workflows/release-provenance.yml` and `--source-ref refs/tags/<tag>`.
+  - `upload` (`contents: write` only): verifies the downloaded zip's `sha256` and `h1` dirhash against `needs.fetch.outputs`, waits up to five minutes for the draft release, uploads `armory-<tag>.zip` and `armory-<tag>.zip.sha256`, confirms both assets are uploaded and non-empty, and publishes the draft (`gh release edit --draft=false`). Immutable releases stay enabled: if any step fails before publication, the release stays a draft. Within the 7-day artifact retention window, rerunning a failed `attest` or `upload` job reuses the `module-zip` artifact; after 7 days the artifact expires and a single-job rerun fails, so a maintainer must rerun all jobs (which lets `fetch` download the zip again and overwrite the artifact).
 
-The proposal is to start with signed tags at v0.1.0 and add the attestation workflow when a product first pins a release.
+Who can cause an attestation depends on the `v*` tag-creation ruleset, which is a repository setting and is not configured by any file in this repository; the `attest` and `upload` jobs have no GitHub Actions environment gate. The intended ruleset restricts creating `v*` tags to repository admins and the `shadewright-release` App (bypass actor on creation only), and forbids updating or deleting `v*` tags for everyone. A published tag is never moved or deleted because `sum.golang.org` records it permanently; a fix to a release is a new patch version.
+
+### Verifying a release
+
+Callers check the Go module cache against `go.sum` (which `go` authenticates with `sum.golang.org`) and can also verify the SLSA build provenance attestation on the module zip attached to the GitHub release:
+
+```bash
+# Verify every downloaded module in your Go module cache against go.sum:
+go mod verify
+
+# Download the release zip and checksum, check the sha256, and verify its build provenance:
+TAG=v0.1.0
+gh release download "${TAG}" --repo shadewright-labs/armory \
+  --pattern "armory-${TAG}.zip" --pattern "armory-${TAG}.zip.sha256"
+sha256sum --check --strict "armory-${TAG}.zip.sha256"
+gh attestation verify "armory-${TAG}.zip" \
+  --repo shadewright-labs/armory \
+  --signer-workflow shadewright-labs/armory/.github/workflows/release-provenance.yml \
+  --source-ref "refs/tags/${TAG}"
+```

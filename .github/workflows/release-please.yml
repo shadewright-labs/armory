@@ -1,0 +1,48 @@
+name: Release
+
+# Keeps one release pull request up to date from the Conventional Commits on main (AGENTS.md).
+# Merging it tags vX.Y.Z, updates CHANGELOG.md and .release-please-manifest.json, and creates a draft GitHub
+# release (draft and force-tag-creation in release-please-config.json). The App token makes the release PR
+# trigger required checks and makes the tag push trigger release-provenance.yml, which downloads the module
+# zip from the Go module proxy, verifies it against sum.golang.org, attests it, attaches the zip and its
+# .sha256 to the draft release and publishes the release. Immutable releases stay enabled.
+#
+# The token comes from the shadewright-release GitHub App, not GITHUB_TOKEN, because pull requests and tags
+# created with GITHUB_TOKEN do not trigger workflows.
+# The App's key lives in the `release` environment, which only deployments from main can use.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Mint a short-lived App token
+        id: app-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: armory
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Release please
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

@@ -7,7 +7,9 @@
 #     passed, skips the upload without a token and cannot hide a failure from ci-ok (no continue-on-error), and
 #     ci.yml passes it only the Codecov token;
 #   - vulncheck.yml runs on its schedule and by hand whatever `inputs.run` holds there;
-#   - every fuzz target is run briefly on pull requests and for minutes in fuzz.yml, both from hack/fuzz-targets.sh.
+#   - every fuzz target is run briefly on pull requests and for minutes in fuzz.yml, both from hack/fuzz-targets.sh;
+#   - release-please.yml and release-provenance.yml enforce per-job permissions, timeouts, sumdb/proxy guards,
+#     Origin.Hash commit binding, SECURITY ERROR fast-fail, cross-job output hashes, rerun overwrite and pre-release skip.
 # Usage: hack/test/workflows_test.sh [repository root]
 set -euo pipefail
 
@@ -101,6 +103,80 @@ check("vulncheck: scheduled and manual runs never skip",
 fuzz = read(".github/workflows/fuzz.yml")
 check("fuzz: targets come from hack/fuzz-targets.sh, on a schedule",
       "hack/fuzz-targets.sh" in fuzz and re.search(r"^  schedule:", fuzz, re.M) is not None)
+
+def job_permissions(job_text):
+    """Returns 'scope: level' entries from the job's permissions: block."""
+    perms, in_perms = [], False
+    for line in job_text.splitlines():
+        if re.match(r"^    permissions:\s*$", line):
+            in_perms = True
+            continue
+        if in_perms:
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if not line.startswith("      "):
+                break
+            perms.append(re.sub(r"\s+#.*$", "", line).strip())
+    return perms
+
+
+rpj = jobs(read(".github/workflows/release-please.yml"))
+rp = rpj.get("release-please", "")
+check("release-please: only contents: read",
+      job_permissions(rp) == ["contents: read"])
+check("release-please: runs in release environment",
+      re.search(r"^\s+environment:\s*release\s*$", rp, re.M) is not None)
+check("release-please: timeout-minutes is set",
+      re.search(r"^\s+timeout-minutes:\s*[1-9][0-9]*\s*$", rp, re.M) is not None)
+
+prov = read(".github/workflows/release-provenance.yml")
+pj = jobs(prov)
+p_fetch, p_attest, p_upload = pj.get("fetch", ""), pj.get("attest", ""), pj.get("upload", "")
+for jname, jbody in (("fetch", p_fetch), ("attest", p_attest), ("upload", p_upload)):
+    check(f"release-provenance/{jname}: timeout-minutes is set",
+          re.search(r"^\s+timeout-minutes:\s*[1-9][0-9]*\s*$", jbody, re.M) is not None)
+check("release-provenance/fetch: only contents: read",
+      job_permissions(p_fetch) == ["contents: read"])
+check("release-provenance/attest: exact permissions (contents: read, id-token: write, attestations: write)",
+      job_permissions(p_attest) == [
+          "contents: read",
+          "id-token: write",
+          "attestations: write",
+      ])
+check("release-provenance/upload: only contents: write",
+      job_permissions(p_upload) == ["contents: write"])
+check("release-provenance/fetch: GOENV=off on both go invocations",
+      p_fetch.count("GOENV=off") >= 2)
+check("release-provenance/fetch: explicit GOPROXY without direct on both go invocations",
+      len(re.findall(r"\bGOPROXY=https://proxy\.golang\.org(?:\s|\\|$)", p_fetch)) >= 2
+      and ",direct" not in p_fetch and "GOPROXY=direct" not in p_fetch)
+check("release-provenance/fetch: explicit GOSUMDB=sum.golang.org on both go invocations",
+      p_fetch.count("GOSUMDB=sum.golang.org") >= 2)
+check("release-provenance/fetch: clears override env vars and unsets GOVCS on both go invocations",
+      all(p_fetch.count(tok) >= 2 for tok in (
+          "GOPRIVATE=", "GONOSUMDB=", "GONOPROXY=", "GOINSECURE=", "GOFLAGS=", "-u GOVCS"
+      )))
+check("release-provenance and docs: no bogus GONOSUMCHECK variable",
+      "GONOSUMCHECK" not in prov and "GONOSUMCHECK" not in read("docs/ci.md"))
+check("release-provenance/fetch: ties Origin.Hash to checked-out tag commit",
+      "Origin.Hash" in p_fetch and "git rev-parse" in p_fetch)
+check("release-provenance/attest: verifies attestation with --source-ref",
+      "--source-ref" in p_attest)
+check("release-provenance/fetch: aborts immediately on SECURITY ERROR",
+      "SECURITY ERROR" in p_fetch)
+check("release-provenance/fetch: exports zip_sha256 and mod_sum outputs",
+      re.search(r"^\s+zip_sha256:", p_fetch, re.M) is not None
+      and re.search(r"^\s+mod_sum:", p_fetch, re.M) is not None)
+check("release-provenance/attest: verifies against needs.fetch.outputs",
+      "needs.fetch.outputs.zip_sha256" in p_attest and "needs.fetch.outputs.mod_sum" in p_attest)
+check("release-provenance/upload: verifies against needs.fetch.outputs",
+      "needs.fetch.outputs.zip_sha256" in p_upload and "needs.fetch.outputs.mod_sum" in p_upload)
+check("release-provenance/fetch: upload-artifact enables overwrite for reruns",
+      "overwrite: true" in p_fetch)
+check("release-provenance: skips pre-release tags cleanly with notice",
+      "::notice::" in p_fetch and "skip=true" in p_fetch
+      and "needs.fetch.outputs.skip != 'true'" in p_attest
+      and "needs.fetch.outputs.skip != 'true'" in p_upload)
 
 if fails:
     print(f"{fails} case(s) failed", file=sys.stderr)

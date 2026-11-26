@@ -46,7 +46,9 @@ Write table-driven tests, keep fixtures under the package's `testdata/`, and add
 
 ## Releases
 
-A release is a Git tag `vX.Y.Z` on a commit of `main`; the Go module proxy and checksum database serve the source from it. There are no binaries, images or release assets. Only a repository admin creates a tag, after the pull requests of that version are merged. Never move or delete a published tag: the checksum database has recorded it, and callers would get a checksum mismatch. A fix to a release is a new patch version. See "Releases" in `docs/ci.md`.
+Releases are driven by Conventional Commits on `main` through `.github/workflows/release-please.yml` (`release-please-config.json` and `.release-please-manifest.json`), using the `shadewright-release` GitHub App: `feat` gives a minor version, `fix` and `perf` give a patch, and `!` or a `BREAKING CHANGE:` footer gives a minor version while Armory is `0.x`. The workflow keeps one release pull request (`chore: release X.Y.Z`) open. A maintainer merges it when the changes for that version are ready; merging it updates `CHANGELOG.md` and `.release-please-manifest.json`, creates the plain `vX.Y.Z` tag on `main` and opens a draft GitHub release.
+
+The `v*` tag push runs `.github/workflows/release-provenance.yml`, which confirms the tag is on `main`, downloads the module zip from `proxy.golang.org` with `sum.golang.org` verification, attests it with `actions/attest-build-provenance`, attaches the zip and its `.sha256` to the draft release and publishes the release. There are no binaries or container images. Never tag a plain `vX.Y.Z` by hand, never edit `CHANGELOG.md` or `.release-please-manifest.json` outside the release pull request, and never move or delete a published tag: the Go checksum database has recorded it permanently, and callers would get a checksum mismatch. A fix to a release is a new patch version. See "Releases" in [docs/ci.md](docs/ci.md#releases) for verification steps (`go mod verify` and `gh attestation verify`).
 
 ## Decisions
 

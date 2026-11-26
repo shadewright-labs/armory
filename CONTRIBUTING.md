@@ -16,6 +16,10 @@ Decisions that fix a package boundary, an API contract, a security rule or a dep
 
 Report vulnerabilities privately using the [security policy](SECURITY.md). See the [code of conduct](CODE_OF_CONDUCT.md) for conduct reports.
 
+## Releases
+
+Releases are generated from Conventional Commits on `main` by `.github/workflows/release-please.yml`. Do not edit `CHANGELOG.md` or `.release-please-manifest.json` by hand, and do not tag `vX.Y.Z` manually. A maintainer merges the open `chore: release X.Y.Z` pull request when a release is ready; the merge creates the `vX.Y.Z` tag on `main` and a draft GitHub release. The tag push runs `.github/workflows/release-provenance.yml`, which downloads the module zip from `proxy.golang.org` with `sum.golang.org` verification, attests it, attaches the zip and its `.sha256` to the release and publishes the draft. See [docs/ci.md](docs/ci.md#releases) for details and verification commands (`go mod verify` and `gh attestation verify`).
+
 ## Licence
 
 Contributions are licensed under the [Apache License 2.0](LICENSE). By opening a pull request, you confirm that you may contribute the change under that licence.
