@@ -1,0 +1,6 @@
+data: {"id":"chatcmpl-test0002","object":"chat.completion.chunk","created":1700000000,"model":"gpt-example","system_fingerprint":"fp_test","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}],"usage":null}
+
+data: {"id":"chatcmpl-test0002","object":"chat.completion.chunk","created":1700000000,"model":"gpt-example","system_fingerprint":"fp_test","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}
+
+data: [DONE]
+
