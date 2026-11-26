@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 var testLimits = Limits{MaxBytes: 1 << 20, MaxLineBytes: 64 << 10, MaxTokens: 1 << 40}
@@ -245,6 +246,19 @@ func TestParseStreamInline(t *testing.T) {
 		{name: "ok", family: Anthropic, body: start + delta + stop, want: ok},
 		{name: "crlf and comments", family: Anthropic, body: strings.ReplaceAll(": keep-alive\n\n"+start+delta+stop,
 			"\n", "\r\n"), want: ok},
+		{name: "byte order mark", family: Anthropic, body: "\xEF\xBB\xBF" + start + delta + stop, want: ok},
+		{name: "bare cr", family: Anthropic, body: strings.ReplaceAll(": keep-alive\n\n"+start+delta+stop, "\n", "\r"),
+			want: ok},
+		{name: "byte order mark and bare cr", family: Anthropic,
+			body: "\xEF\xBB\xBF" + strings.ReplaceAll(start+delta+stop, "\n", "\r"), want: ok},
+		{name: "event data at the line limit", family: Anthropic,
+			body: start + "data: " + strings.Repeat("x", 50) + "\ndata: " + strings.Repeat("y", 49) + "\n\n" +
+				delta + stop,
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: 100, MaxTokens: 100}, wantErr: ErrMalformed},
+		{name: "event data over the line limit", family: Anthropic,
+			body: start + "data: " + strings.Repeat("x", 50) + "\ndata: " + strings.Repeat("y", 50) + "\n\n" +
+				delta + stop,
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: 100, MaxTokens: 100}, wantErr: ErrLineTooLong},
 		{name: "no space after colon", family: Anthropic, body: strings.ReplaceAll(start+delta+stop, "data: ",
 			"data:"), want: ok},
 		{name: "data split over lines", family: Anthropic,
@@ -353,6 +367,21 @@ func TestReaderErrorIsWrapped(t *testing.T) {
 	}
 	if _, err := ParseStream(Anthropic, &errReader{data: "data: {}\n", err: boom}, testLimits); !errors.Is(err, boom) {
 		t.Errorf("ParseStream err = %v, want the reader's error", err)
+	}
+}
+
+// TestLineEndsAcrossReads feeds a stream one byte at a time, so that a CR is read before the byte after it.
+func TestLineEndsAcrossReads(t *testing.T) {
+	const body = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n" +
+		"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+	want := Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}
+	for _, end := range []string{"\n", "\r\n", "\r"} {
+		r := iotest.OneByteReader(strings.NewReader("\xEF\xBB\xBF" + strings.ReplaceAll(body, "\n", end)))
+		got, err := ParseStream(Anthropic, r, testLimits)
+		if err != nil || got != want {
+			t.Errorf("line end %q: usage = %+v, err = %v, want %+v", end, got, err, want)
+		}
 	}
 }
 

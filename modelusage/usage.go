@@ -111,7 +111,8 @@ const MaxTokensCeiling int64 = 1 << 60
 type Limits struct {
 	// MaxBytes bounds the bytes read from the reader, below math.MaxInt64. A longer reply is a *LimitError.
 	MaxBytes int64
-	// MaxLineBytes bounds one line of a stream, without its line ending. ParseJSON does not use it.
+	// MaxLineBytes bounds one line of a stream, without its line ending, and the data of one event, its data
+	// lines joined. At most math.MaxInt-5. ParseJSON does not use it.
 	MaxLineBytes int
 	// MaxTokens bounds every count, the whole prompt and the total. At most MaxTokensCeiling.
 	MaxTokens int64
@@ -122,8 +123,9 @@ var (
 	ErrInvalidLimits = errors.New("modelusage: invalid limits or family")
 	// ErrTooLarge matches a *LimitError for a reply longer than Limits.MaxBytes.
 	ErrTooLarge = errors.New("modelusage: the reply is larger than the byte limit")
-	// ErrLineTooLong matches a *LimitError for a stream line longer than Limits.MaxLineBytes.
-	ErrLineTooLong = errors.New("modelusage: a stream line is longer than the line limit")
+	// ErrLineTooLong matches a *LimitError for a stream line, or the data of one event, longer than
+	// Limits.MaxLineBytes.
+	ErrLineTooLong = errors.New("modelusage: a stream line or event is longer than the line limit")
 	// ErrMalformed is returned for a reply that is not valid JSON or not a valid stream of the family, for a
 	// member name that appears twice in one object, and for a count that is not an integer.
 	ErrMalformed = errors.New("modelusage: the reply is malformed")
@@ -172,7 +174,7 @@ func (e *TruncatedError) Unwrap() error { return e.Err }
 // LimitError is returned when a reply or a stream line passes its byte limit. It matches ErrTooLarge or
 // ErrLineTooLong with errors.Is.
 type LimitError struct {
-	// Line is set when a stream line, not the whole reply, passed its limit.
+	// Line is set when a stream line or the data of one event, not the whole reply, passed its limit.
 	Line bool
 	// Limit is the limit that was passed, in bytes.
 	Limit int64
@@ -180,7 +182,7 @@ type LimitError struct {
 
 func (e *LimitError) Error() string {
 	if e.Line {
-		return fmt.Sprintf("modelusage: a stream line is longer than the line limit of %d bytes", e.Limit)
+		return fmt.Sprintf("modelusage: a stream line or event is longer than the line limit of %d bytes", e.Limit)
 	}
 	return fmt.Sprintf("modelusage: the reply is larger than the byte limit of %d bytes", e.Limit)
 }
@@ -201,7 +203,7 @@ func (l Limits) check(f Family, stream bool) error {
 	if l.MaxBytes <= 0 || l.MaxBytes == math.MaxInt64 || l.MaxTokens <= 0 || l.MaxTokens > MaxTokensCeiling {
 		return ErrInvalidLimits
 	}
-	if stream && (l.MaxLineBytes <= 0 || l.MaxLineBytes >= math.MaxInt-1) {
+	if stream && (l.MaxLineBytes <= 0 || l.MaxLineBytes > math.MaxInt-5) {
 		return ErrInvalidLimits
 	}
 	return nil

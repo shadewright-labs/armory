@@ -58,8 +58,10 @@ func usageOf(o object, f Family, maxTokens int64) (Usage, error) {
 
 // ParseStream reads a streamed reply of family f, sent as server-sent events, from r and returns its usage.
 // It reads at most lim.MaxBytes bytes in all (and one more, to tell the limit apart from a longer stream) and
-// refuses a line longer than lim.MaxLineBytes. Lines end in LF or CRLF. Comment lines and fields other than
-// data are ignored; the data lines of one event are joined and decoded as one JSON value. Events of unknown
+// refuses a line, or the joined data of one event, longer than lim.MaxLineBytes. Lines end in LF, CRLF or a
+// bare CR, and a byte order mark at the start of the stream is skipped, as the server-sent events format
+// allows. Comment lines and fields other than data are ignored; the data lines of one event are joined with
+// LF and decoded as one JSON value. Events of unknown
 // types are ignored. An event after the final one is ErrMalformed.
 //
 // Which usage counts, per family:
@@ -93,16 +95,21 @@ func ParseStream(f Family, r io.Reader, lim Limits) (Usage, error) {
 	}
 	br := &boundedReader{r: r, max: lim.MaxBytes}
 	sc := bufio.NewScanner(br)
-	// The buffer holds a line and its line ending, which ScanLines needs to see to return the line.
-	sc.Buffer(make([]byte, 0, min(4096, lim.MaxLineBytes+2)), lim.MaxLineBytes+2)
+	// The buffer holds a line and its line ending, which scanLines needs to see to return the line, and the
+	// byte order mark that may lead the first line.
+	sc.Buffer(make([]byte, 0, min(4096, lim.MaxLineBytes+5)), lim.MaxLineBytes+5)
+	sc.Split(scanLines)
 	st := &streamState{family: f, maxTokens: lim.MaxTokens}
 	var data []byte
-	pending := false
+	pending, first := false, true
 	for sc.Scan() {
 		if br.over() {
 			return Usage{}, &LimitError{Limit: lim.MaxBytes}
 		}
 		line := sc.Bytes()
+		if first {
+			line, first = bytes.TrimPrefix(line, []byte("\xEF\xBB\xBF")), false
+		}
 		if len(line) > lim.MaxLineBytes {
 			return Usage{}, &LimitError{Line: true, Limit: int64(lim.MaxLineBytes)}
 		}
@@ -128,6 +135,11 @@ func ParseStream(f Family, r io.Reader, lim Limits) (Usage, error) {
 		}
 		data = append(data, value...)
 		pending = true
+		// The joined data of one event is held to the line limit too, so that many data lines cannot make one
+		// event as large as the whole reply.
+		if len(data) > lim.MaxLineBytes {
+			return Usage{}, &LimitError{Line: true, Limit: int64(lim.MaxLineBytes)}
+		}
 	}
 	if br.over() {
 		return Usage{}, &LimitError{Limit: lim.MaxBytes}
@@ -377,4 +389,28 @@ func (s *streamState) finish() (Usage, error) {
 		return Usage{}, ErrNoUsage
 	}
 	return s.usage, nil
+}
+
+// scanLines is a bufio.SplitFunc for server-sent events: a line ends in CRLF, LF or a bare CR, and the line
+// ending is not part of the line.
+func scanLines(data []byte, atEOF bool) (int, []byte, error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
+		switch {
+		case data[i] == '\n':
+			return i + 1, data[:i], nil
+		case i+1 < len(data) && data[i+1] == '\n':
+			return i + 2, data[:i], nil
+		case i+1 < len(data) || atEOF:
+			return i + 1, data[:i], nil
+		}
+		// A CR at the end of what was read so far: the next byte tells CRLF from a bare CR.
+		return 0, nil, nil
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
 }
