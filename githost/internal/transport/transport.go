@@ -5,27 +5,39 @@
 // through one private path, [Client.Do]. That path:
 //
 //   - builds the URL from the pinned origin and an escaped path, and refuses any URL whose scheme is not
-//     https or whose host is not the pinned one, before a credential is asked for or attached;
-//   - asks the Credential for a token before each attempt and installs it in the Authorization header
-//     only there, after the origin check;
+//     https or whose host is not the pinned one, or whose path the request's [Template] does not name,
+//     before a credential is asked for or attached;
+//   - asks the Credential for a token before each attempt, with the caller's context, and installs it
+//     in the Authorization header only there, after the origin check;
+//   - sends the request with a context that ends with the caller's and has its deadline but returns no
+//     value, so no client trace (net/http/httptrace) or dial trace of the caller sees the request;
 //   - never follows a redirect: a 3xx other than 304 is an error, and 304 is returned to the caller for
 //     a conditional request;
 //   - reads every 2xx body with a bound the caller sets, refuses a declared length over it before
-//     reading, and returns githost.ErrTooLarge past it;
+//     reading, and returns githost.ErrTooLarge past it; a 2xx answer to a write whose body cannot be
+//     used is githost.ErrUnusableReceipt and is never sent again;
 //   - retries reads, and writes marked idempotent, on network errors, timeouts, 408, 429, 5xx and rate
 //     limits, with exponential backoff and jitter, Retry-After and rate limit reset delays, and the
-//     context honoured during every wait; a write not marked idempotent is sent once, and a lost answer
-//     is githost.ErrOutcomeUnknown;
+//     context honoured during every wait; a write not marked idempotent is sent once;
+//   - once an attempt of a write may have reached the host without an answer that says it did not
+//     write, returns every later failure of the call as githost.ErrOutcomeUnknown next to its own kind;
 //   - calls the write check before every attempt of a write, and sends nothing more when it refuses;
-//   - builds error text from fixed words, the operation label and the status code only, never from a
-//     body, URL, header, token or a wrapped error of another package;
-//   - reports one payload-free Event per attempt to the Observer.
+//   - builds error text from fixed words, the operation label, the status code and a valid refusal class
+//     only, never from a body, URL, header, token or a wrapped error of another package or a callback;
+//   - reports one payload-free Event per attempt to the Observer, after the attempt is over.
 //
 // An attempt is one call of http.Client.Do. Below it, Go's HTTP/1 transport may send a request again on
 // a new connection when a reused one fails; for a request with a body it does so only when the body can
 // be rewound, so Do clears GetBody on every request with a body, and Go then sends it again only when
 // nothing of it was written. Each write check is therefore followed by at most one write that reaches
 // the host.
+//
+// What sees the request after the token is set: the http.Client this package builds (its redirect
+// policy only returns the last answer and never sees a token-bearing request of its own), and
+// Config.RoundTripper when one is set, which is a trusted component and sees the Authorization header.
+// The Credential, the write check, the Observer, Jitter, Now and Sleep never get the request. Errors of
+// net/http (a *url.Error holds the method and URL, not the headers) are replaced, never wrapped. No code
+// of this package formats a request, so a panic, in a callback or below, prints no header value.
 package transport
 
 import (
@@ -34,7 +46,6 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"io"
 	"math/rand/v2"
 	"net"
@@ -70,13 +81,12 @@ const (
 	maxProbeBody = 16 << 10
 	// maxHeaderBytes bounds the response headers.
 	maxHeaderBytes = 256 << 10
-	// maxCursor bounds a page cursor taken from a Link header.
-	maxCursor = 256
 )
 
 // WriteCheck is called right before every attempt of a write, after the token is set and the body is
-// built. A non-nil error stops the call: nothing more is sent, and Do returns an error matching
-// githost.ErrStoppedBeforeWrite that keeps neither the check's text nor its error.
+// built, with the caller's context. A non-nil error stops the call: nothing more is sent, and Do returns
+// an error matching githost.ErrStoppedBeforeWrite. Of the check's error only the class of a valid
+// *githost.Refusal in its chain is kept, as a new *githost.Refusal; its text and identity are not.
 //
 // Provisional: this hook stands in for the write gate of the design record, whose shape is being
 // reworked. It describes the request, not the product operation, and will change.
@@ -84,25 +94,30 @@ type WriteCheck func(ctx context.Context, s Send) error
 
 // Send describes one attempt of a write for a [WriteCheck].
 type Send struct {
-	Op       string // the request's fixed operation label
-	Method   string
-	Template string // the request's path template, never the raw path
-	Attempt  int    // 1 for the first send, then 2, 3, ... for each retry
+	Op       string   // the request's fixed operation label
+	Method   string   // the HTTP method
+	Template Template // the request's path template, never the raw path
+	Attempt  int      // 1 for the first send, then 2, 3, ... for each retry
 }
 
-// Event is what the Observer gets for each attempt that was sent: no body, header, query, raw path or
-// token.
+// Event is what the Observer gets for each attempt that was sent: no error, body, header, query, raw
+// path or token.
 type Event struct {
-	Method   string
-	Host     string
-	Template string // the request's path template, never the raw path
-	Status   int    // zero when no answer came
-	Attempt  int
+	Method   string   // the HTTP method
+	Host     string   // the pinned host
+	Template Template // the request's path template, never the raw path
+	Status   int      // zero when no answer came
+	Attempt  int      // 1 for the first send, then 2, 3, ... for each retry
+	// Duration runs from the hand-off to the HTTP client until the answer's body was read to its end
+	// (or to the bound) and closed, or until the attempt failed.
 	Duration time.Duration
 }
 
-// Observer receives one Event per attempt. It is called synchronously and cannot change what the
-// client does.
+// Observer receives one Event per attempt. It is called synchronously once the attempt is over: the
+// answer is read and closed, nothing is in flight, and the attempt timeout no longer runs, so a slow
+// Observer cannot cut an answer short. Do neither returns nor starts another attempt until it returns,
+// and checks the caller's context before the next attempt, so a slow Observer starts nothing past the
+// caller's deadline; it must still not block, because Do returns only after it does.
 type Observer func(Event)
 
 // Config builds a [Client].
@@ -131,7 +146,9 @@ type Config struct {
 	AttemptTimeout time.Duration // one attempt, body included; 0 means DefaultAttemptTimeout
 	BodyLimit      int64         // default bound of a 2xx body; 0 means DefaultBodyLimit
 
-	// RoundTripper replaces the HTTP transport; tests use it to trust a loopback server's certificate.
+	// RoundTripper replaces the HTTP transport; tests use it to trust a loopback server's certificate. It
+	// is a trusted component: it gets every request with its Authorization header. Only code of this
+	// module sets it; no exported API passes one through.
 	RoundTripper http.RoundTripper
 	// Jitter maps a backoff delay to the one waited; nil means a random value in [d/2, d].
 	Jitter func(time.Duration) time.Duration
@@ -168,9 +185,9 @@ type Request struct {
 	Method string // GET, HEAD, POST, PUT or PATCH
 	// Path is the escaped path, starting with "/", built from escaped segments only. It holds no query.
 	Path string
-	// Template is the path with its variable segments named, such as "/repos/{owner}/{repo}/pulls/{n}",
-	// for the Observer and the write check.
-	Template    string
+	// Template names Path, such as "/repos/{owner}/{repo}/pulls/{n}", for the Observer and the write
+	// check. Host packages declare their templates as constants; see [Template].
+	Template    Template
 	Query       url.Values
 	Body        []byte
 	ContentType string // sent when Body is set; empty means application/json
@@ -318,23 +335,37 @@ func (c *Client) Do(ctx context.Context, r Request) (Response, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
+	write := isWrite(r.Method)
+	// mayHaveWritten is set once an attempt of the write may have reached the host without an answer that
+	// says it did not write. From then on no failure of the call may read as "nothing was written".
+	mayHaveWritten := false
 	for attempt := 1; ; attempt++ {
-		resp, err := c.once(ctx, r, u, attempt)
-		if err == nil || !errors.Is(err, githost.ErrRetryable) || attempt >= c.attempts ||
-			(isWrite(r.Method) && !r.Idempotent) {
-			return resp, err
+		resp, sent, err := c.once(ctx, r, u, attempt)
+		mayHaveWritten = mayHaveWritten || (write && sent)
+		switch {
+		case err == nil && (!mayHaveWritten || success(resp.Status)):
+			return resp, nil
+		case err == nil:
+			// An answer such as 409 or 422 after an attempt whose answer was lost may be about that attempt.
+			return Response{}, outcomeUnknown(r.Op, StatusError(r.Op, resp.Status))
+		case errors.Is(err, githost.ErrUnusableReceipt):
+			return Response{}, err
+		case !errors.Is(err, githost.ErrRetryable) || attempt >= c.attempts || (write && !r.Idempotent):
+			return Response{}, finalError(r.Op, err, mayHaveWritten)
 		}
 		if werr := c.backoff(ctx, r.Op, attempt, err); werr != nil {
-			return Response{}, werr
+			return Response{}, finalError(r.Op, werr, mayHaveWritten)
 		}
 	}
 }
 
 func isWrite(method string) bool { return method != http.MethodGet && method != http.MethodHead }
 
+func success(status int) bool { return status >= 200 && status <= 299 }
+
 // buildURL makes the URL of r on the pinned origin and refuses anything else: a method outside the
-// set, a path that does not start with one slash, holds a query, a fragment or a backslash, or would
-// name another host.
+// set, a path that does not start with one slash, holds a query, a fragment or a backslash, would name
+// another host, or that the template does not name.
 func (c *Client) buildURL(r Request) (*url.URL, error) {
 	rejected := &githost.Error{Op: r.Op, Kind: githost.ErrRejected}
 	switch r.Method {
@@ -342,8 +373,8 @@ func (c *Client) buildURL(r Request) (*url.URL, error) {
 	default:
 		return nil, rejected
 	}
-	if r.Op == "" || r.Template == "" || !strings.HasPrefix(r.Path, "/") || strings.HasPrefix(r.Path, "//") ||
-		strings.ContainsAny(r.Path, "?#\\") {
+	if r.Op == "" || !strings.HasPrefix(r.Path, "/") || strings.HasPrefix(r.Path, "//") ||
+		strings.ContainsAny(r.Path, "?#\\") || !r.Template.names(r.Path) {
 		return nil, rejected
 	}
 	u, err := url.Parse("https://" + c.host + r.Path)
@@ -357,22 +388,27 @@ func (c *Client) buildURL(r Request) (*url.URL, error) {
 }
 
 // once is one attempt: token, request, origin check, Authorization, write check, send, classification.
-func (c *Client) once(ctx context.Context, r Request, u *url.URL, attempt int) (Response, error) {
+// sent reports whether the attempt may have reached the host without an answer that says it was not
+// carried out.
+func (c *Client) once(ctx context.Context, r Request, u *url.URL, attempt int) (Response, bool, error) {
 	if ctx.Err() != nil {
-		return Response{}, ctxError(r.Op, ctx, false)
+		return Response{}, false, ctxError(r.Op, ctx)
 	}
 	write := isWrite(r.Method)
+	// The credential is the product's: it gets the caller's context, values included.
 	tok, err := c.cred.Token(ctx, githost.Scope{Repo: c.repo, Write: write})
 	if err != nil {
-		return Response{}, credentialError(r.Op, err)
+		return Response{}, false, credentialError(r.Op, err)
 	}
 	var body io.Reader
 	if r.Body != nil {
 		body = bytes.NewReader(r.Body)
 	}
-	req, err := http.NewRequestWithContext(ctx, r.Method, u.String(), body)
+	// The wire request gets a context without the caller's values, so no client trace of the caller sees
+	// it, its Authorization header included.
+	req, err := http.NewRequestWithContext(wireContext{ctx}, r.Method, u.String(), body)
 	if err != nil {
-		return Response{}, fixed(r.Op, "request could not be built")
+		return Response{}, false, fixed(r.Op, "request could not be built")
 	}
 	// Go's transport sends a request with a body again below Do only when it can rewind the body. Without
 	// GetBody it does so only when nothing of the request was written, so a write check covers one send.
@@ -400,16 +436,17 @@ func (c *Client) once(ctx context.Context, r Request, u *url.URL, attempt int) (
 }
 
 // send is the one place a request leaves the process. The origin is checked before the token is set;
-// the write check is the last step before the request is handed to the HTTP client.
+// the write check is the last step before the request is handed to the HTTP client. ctx is the call's
+// context; the request carries a [wireContext] of it.
 func (c *Client) send(
 	ctx context.Context, r Request, req *http.Request, tok githost.Token, attempt int,
-) (Response, error) {
+) (Response, bool, error) {
 	if !onOrigin(req.URL, c.host) {
-		return Response{}, &githost.Error{Op: r.Op, Kind: githost.ErrRejected}
+		return Response{}, false, &githost.Error{Op: r.Op, Kind: githost.ErrRejected}
 	}
 	scheme, value, ok := secret.Reveal(tok)
 	if !ok {
-		return Response{}, fixed(r.Op, "credential returned no token")
+		return Response{}, false, fixed(r.Op, "credential returned no token")
 	}
 	switch githost.Scheme(scheme) {
 	case githost.Bearer:
@@ -417,88 +454,91 @@ func (c *Client) send(
 	case githost.Basic:
 		req.Header.Set("Authorization", "Basic "+basic(value))
 	default:
-		return Response{}, fixed(r.Op, "credential returned a token of an unknown scheme")
+		return Response{}, false, fixed(r.Op, "credential returned a token of an unknown scheme")
 	}
-	write := isWrite(r.Method)
-	if write {
+	if isWrite(r.Method) {
 		if c.check == nil {
-			return Response{}, &githost.Error{Op: r.Op, Kind: githost.ErrStoppedBeforeWrite}
+			return Response{}, false, &githost.Error{Op: r.Op, Kind: githost.ErrStoppedBeforeWrite}
 		}
 		if ctx.Err() != nil {
-			return Response{}, ctxError(r.Op, ctx, false)
+			return Response{}, false, ctxError(r.Op, ctx)
 		}
 		if err := c.check(ctx, Send{Op: r.Op, Method: r.Method, Template: r.Template, Attempt: attempt}); err != nil {
-			return Response{}, &githost.Error{Op: r.Op, Kind: githost.ErrStoppedBeforeWrite}
+			return Response{}, false, refusedError(r.Op, err)
 		}
 	}
-	// A write that may not be repeated and whose answer is lost has an unknown outcome.
-	once := write && !r.Idempotent
 
 	start := time.Now()
 	resp, err := c.httpClient.Do(req)
-	status := 0
-	if resp != nil {
-		status = resp.StatusCode
+	if err != nil {
+		c.emit(r, 0, attempt, time.Since(start))
+		// The error of http.Client.Do holds the URL and possibly answer text: it is replaced, never wrapped.
+		return Response{}, !errors.Is(err, errOffOrigin), c.transportError(ctx, r.Op, err)
 	}
+	out, sent, err := c.answer(ctx, r, resp)
+	_ = resp.Body.Close()
+	c.emit(r, resp.StatusCode, attempt, time.Since(start))
+	return out, sent, err
+}
+
+// emit reports an attempt that is over to the Observer.
+func (c *Client) emit(r Request, status, attempt int, d time.Duration) {
 	if c.observe != nil {
 		c.observe(Event{Method: r.Method, Host: c.host, Template: r.Template, Status: status, Attempt: attempt,
-			Duration: time.Since(start)})
+			Duration: d})
 	}
-	if err != nil {
-		// The error of http.Client.Do holds the URL and possibly answer text: it is replaced, never wrapped.
-		return Response{}, c.transportError(ctx, r.Op, err, once)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if ctx.Err() != nil {
-		// An answer that raced the end of the call's context is not taken: the context ended first.
-		return Response{}, ctxError(r.Op, ctx, once)
-	}
-	return c.classify(ctx, r, resp, once)
 }
 
 // basic is the credentials of Basic authentication with an empty user name and value as the password.
 func basic(value string) string { return base64.StdEncoding.EncodeToString([]byte(":" + value)) }
 
-// classify turns an answer into a Response or an error.
-func (c *Client) classify(ctx context.Context, r Request, resp *http.Response, once bool) (Response, error) {
+// answer turns an answer into a Response or an error. sent reports whether the attempt may have been
+// carried out by the host although the answer does not say so.
+func (c *Client) answer(ctx context.Context, r Request, resp *http.Response) (Response, bool, error) {
 	code := resp.StatusCode
+	write := isWrite(r.Method)
 	switch {
-	case code >= 200 && code <= 299:
+	case success(code):
 		limit := r.Limit
 		if limit <= 0 {
 			limit = c.bodyLimit
 		}
 		data, err := readBounded(resp, limit)
-		if errors.Is(err, githost.ErrTooLarge) {
-			return Response{}, &githost.Error{Op: r.Op, Status: code, Kind: githost.ErrTooLarge}
+		if err == nil && ctx.Err() != nil {
+			// An answer that raced the end of the call's context is not taken: the context ended first.
+			err = ctxError(r.Op, ctx)
 		}
-		if err != nil {
-			return Response{}, c.transportError(ctx, r.Op, err, once)
+		switch {
+		case err == nil:
+			return Response{Status: code, Header: resp.Header, Body: data}, false, nil
+		case write:
+			// The host carried out the write; only its answer is lost. Sending it again is never right.
+			return Response{}, false, receiptError(ctx, r.Op, code, err)
+		case errors.Is(err, githost.ErrTooLarge):
+			return Response{}, false, &githost.Error{Op: r.Op, Status: code, Kind: githost.ErrTooLarge}
+		default:
+			return Response{}, false, c.transportError(ctx, r.Op, err)
 		}
-		if ctx.Err() != nil {
-			return Response{}, ctxError(r.Op, ctx, once)
-		}
-		return Response{Status: code, Header: resp.Header, Body: data}, nil
+	case ctx.Err() != nil:
+		return Response{}, write, ctxError(r.Op, ctx)
 	case code == http.StatusNotModified:
-		return Response{Status: code, Header: resp.Header}, nil
+		return Response{Status: code, Header: resp.Header}, false, nil
 	case code >= 300 && code <= 399:
 		// A redirect is never followed, so its answer is an error, whatever Location it names.
-		return Response{}, &githost.Error{Op: r.Op, Status: code}
+		return Response{}, false, &githost.Error{Op: r.Op, Status: code}
 	case code == http.StatusForbidden || code == http.StatusTooManyRequests:
 		if d, limited := rateLimited(resp, c.now()); limited {
-			return Response{}, &githost.RetryableError{RetryAfter: d, Err: &githost.Error{Op: r.Op, Status: code}}
+			// A rate limit refused the request: nothing was carried out.
+			return Response{}, false, &githost.RetryableError{RetryAfter: d, Err: &githost.Error{Op: r.Op, Status: code}}
 		}
-		return Response{Status: code, Header: resp.Header}, nil
+		return Response{Status: code, Header: resp.Header}, false, nil
 	case code == http.StatusRequestTimeout || (code >= 500 && code <= 599):
-		if once {
-			return Response{}, &githost.Error{Op: r.Op, Status: code, Kind: githost.ErrOutcomeUnknown}
-		}
-		return Response{}, &githost.RetryableError{
+		return Response{}, write, &githost.RetryableError{
 			RetryAfter: retryafter.Header(resp.Header, c.now(), maxDelay),
 			Err:        &githost.Error{Op: r.Op, Status: code},
 		}
 	}
-	return Response{Status: code, Header: resp.Header}, nil
+	return Response{Status: code, Header: resp.Header}, false, nil
 }
 
 // readBounded reads a body of at most limit bytes, refusing a declared length over it before reading.
@@ -550,8 +590,12 @@ func mentionsRateLimit(r io.Reader) bool {
 
 // backoff waits before the attempt after attempt: the delay the host asked for, or an exponential one
 // with jitter. It returns err when the host asked for more than maxWait or the wait would pass the
-// deadline of ctx, and the end of ctx when it ends during the wait.
+// deadline of ctx, and the end of ctx when it has ended or ends during the wait.
 func (c *Client) backoff(ctx context.Context, op string, attempt int, err error) error {
+	if ctx.Err() != nil {
+		// The context ended during the attempt or the Observer: the call is over.
+		return ctxError(op, ctx)
+	}
 	d, asked := askedDelay(err)
 	if asked && d > c.maxWait {
 		return err
@@ -564,7 +608,7 @@ func (c *Client) backoff(ctx context.Context, op string, attempt int, err error)
 		return err
 	}
 	if serr := c.sleep(ctx, d); serr != nil {
-		return ctxError(op, ctx, false)
+		return ctxError(op, ctx)
 	}
 	return nil
 }
@@ -575,144 +619,4 @@ func askedDelay(err error) (time.Duration, bool) {
 		return r.RetryAfter, true
 	}
 	return 0, false
-}
-
-// fixed is an error of fixed text with no kind and no wrapped error.
-func fixed(op, msg string) error { return errors.New("githost: " + op + ": " + msg) }
-
-// transportError replaces an error of the HTTP client, which may hold the URL or answer text, with fixed
-// text and its class. A write sent once whose answer is lost has an unknown outcome.
-func (c *Client) transportError(ctx context.Context, op string, err error, once bool) error {
-	if ctx.Err() != nil {
-		return ctxError(op, ctx, once)
-	}
-	if errors.Is(err, errOffOrigin) {
-		return &githost.Error{Op: op, Kind: githost.ErrRejected}
-	}
-	if once {
-		return &githost.Error{Op: op, Kind: githost.ErrOutcomeUnknown}
-	}
-	var ne net.Error
-	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
-		return &githost.RetryableError{Err: fixed(op, "request timed out")}
-	}
-	return &githost.RetryableError{Err: fixed(op, "request failed (network)")}
-}
-
-// ctxError reports the end of the call's context. A deadline is retryable by the caller; a cancellation
-// is not. When a write that may not be repeated was already sent, the outcome is unknown as well.
-func ctxError(op string, ctx context.Context, sent bool) error {
-	cause := context.Canceled
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		cause = context.DeadlineExceeded
-	}
-	var err error
-	if sent {
-		err = fmt.Errorf("githost: %s: %w: %w", op, githost.ErrOutcomeUnknown, cause)
-	} else {
-		err = fmt.Errorf("githost: %s: %w", op, cause)
-	}
-	if errors.Is(cause, context.DeadlineExceeded) && !sent {
-		return &githost.RetryableError{Err: err}
-	}
-	return err
-}
-
-// credentialError replaces an error of the Credential, which may hold any text, with fixed text that
-// keeps only its class.
-func credentialError(op string, err error) error {
-	const msg = "credential unavailable"
-	switch {
-	case errors.Is(err, context.Canceled):
-		return fmt.Errorf("githost: %s: %s: %w", op, msg, context.Canceled)
-	case errors.Is(err, context.DeadlineExceeded):
-		return &githost.RetryableError{Err: fmt.Errorf("githost: %s: %s: %w", op, msg, context.DeadlineExceeded)}
-	case errors.Is(err, githost.ErrRetryable):
-		after, _ := askedDelay(err)
-		return &githost.RetryableError{RetryAfter: after, Err: fixed(op, msg)}
-	}
-	for _, kind := range []error{githost.ErrNotFound, githost.ErrForbidden, githost.ErrUnauthorized} {
-		if errors.Is(err, kind) {
-			return fmt.Errorf("githost: %s: %s: %w", op, msg, kind)
-		}
-	}
-	return fixed(op, msg)
-}
-
-// StatusError classifies a status the host client did not handle itself.
-func StatusError(op string, status int) error {
-	var kind error
-	switch status {
-	case http.StatusNotFound, http.StatusGone:
-		kind = githost.ErrNotFound
-	case http.StatusConflict:
-		kind = githost.ErrConflict
-	case http.StatusForbidden:
-		kind = githost.ErrForbidden
-	case http.StatusUnauthorized:
-		kind = githost.ErrUnauthorized
-	case http.StatusBadRequest, http.StatusUnprocessableEntity:
-		kind = githost.ErrRejected
-	}
-	return &githost.Error{Op: op, Status: status, Kind: kind}
-}
-
-// NextPage reads the rel="next" link of a paged answer and returns the value of its query parameter
-// param, for the caller to set on its own next Request. The link's URL is never followed or kept. ok is
-// false on the last page. A next link that is not on the pinned origin, or whose cursor is missing, too
-// long or holds anything but letters, digits and "-._~=+", is ErrUntrustedAnswer.
-func (c *Client) NextPage(op string, h http.Header, param string) (cursor string, ok bool, err error) {
-	untrusted := &githost.Error{Op: op, Kind: githost.ErrUntrustedAnswer}
-	for _, link := range h.Values("Link") {
-		for part := range strings.SplitSeq(link, ",") {
-			target, params, found := strings.Cut(strings.TrimSpace(part), ";")
-			if !found || !isNext(params) {
-				continue
-			}
-			target = strings.TrimSpace(target)
-			if !strings.HasPrefix(target, "<") || !strings.HasSuffix(target, ">") {
-				return "", false, untrusted
-			}
-			u, perr := url.Parse(target[1 : len(target)-1])
-			if perr != nil || !onOrigin(u, c.host) {
-				return "", false, untrusted
-			}
-			v := u.Query().Get(param)
-			if !validCursor(v) {
-				return "", false, untrusted
-			}
-			return v, true, nil
-		}
-	}
-	return "", false, nil
-}
-
-func isNext(params string) bool {
-	for p := range strings.SplitSeq(params, ";") {
-		k, v, _ := strings.Cut(strings.TrimSpace(p), "=")
-		if strings.EqualFold(strings.TrimSpace(k), "rel") {
-			for rel := range strings.FieldsSeq(strings.Trim(strings.TrimSpace(v), `"`)) {
-				if strings.EqualFold(rel, "next") {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-func validCursor(v string) bool {
-	if v == "" || len(v) > maxCursor {
-		return false
-	}
-	for i := range len(v) {
-		ch := v[i]
-		switch {
-		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z', ch >= '0' && ch <= '9':
-		case strings.IndexByte("-._~=+", ch) >= 0:
-		default:
-			return false
-		}
-	}
-	return true
 }
