@@ -7,8 +7,10 @@
 // counts of each family add up, so that a token is never counted twice and a cached token is never missed.
 //
 // Reading is bounded. A reply longer than [Limits.MaxBytes], or a stream line longer than
-// [Limits.MaxLineBytes], is a [*LimitError]. Malformed input is an error, never a panic. Unknown fields and
-// unknown stream events are ignored. A count that is negative, not an integer, above [Limits.MaxTokens], or
+// [Limits.MaxLineBytes], is a [*LimitError]. Malformed input is an error, never a panic. Member names match
+// exactly, case included, and a name that appears twice in an object the parser reads is [ErrMalformed].
+// Unknown fields and unknown stream events are ignored. A count that is not an integer (a fraction, an
+// exponent, a string) is [ErrMalformed]. A count that is negative, above [Limits.MaxTokens], or
 // inconsistent with the other counts (more cached tokens than input tokens, for example) is
 // [ErrOutOfRange], never a number. Error text is fixed and never quotes the reply.
 //

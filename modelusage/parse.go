@@ -3,7 +3,6 @@ package modelusage
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -30,22 +29,31 @@ func ParseJSON(f Family, r io.Reader, lim Limits) (Usage, error) {
 	if err != nil {
 		return Usage{}, fmt.Errorf("modelusage: reading the reply: %w", err)
 	}
-	if f == Anthropic {
-		var reply struct {
-			Usage *anthropicUsage `json:"usage"`
-		}
-		if err := decodeObject(data, &reply); err != nil {
-			return Usage{}, err
-		}
-		return anthropicOf(reply.Usage, lim.MaxTokens)
-	}
-	var reply struct {
-		Usage *openAIUsage `json:"usage"`
-	}
-	if err := decodeObject(data, &reply); err != nil {
+	reply, err := parseObject(data)
+	if err != nil {
 		return Usage{}, err
 	}
-	return openAIOf(reply.Usage, f, lim.MaxTokens)
+	block, err := reply.child("usage")
+	if err != nil {
+		return Usage{}, err
+	}
+	return usageOf(block, f, lim.MaxTokens)
+}
+
+// usageOf converts the complete usage block o of family f, which may be nil.
+func usageOf(o object, f Family, maxTokens int64) (Usage, error) {
+	if f == Anthropic {
+		au, err := readAnthropicUsage(o)
+		if err != nil {
+			return Usage{}, err
+		}
+		return anthropicOf(au, maxTokens)
+	}
+	ou, err := readOpenAIUsage(o, f)
+	if err != nil {
+		return Usage{}, err
+	}
+	return openAIOf(ou, f, maxTokens)
 }
 
 // ParseStream reads a streamed reply of family f, sent as server-sent events, from r and returns its usage.
@@ -200,29 +208,40 @@ func (s *streamState) event(data []byte) error {
 	}
 }
 
-func (s *streamState) anthropicEvent(data []byte) error {
-	var ev struct {
-		Type    string `json:"type"`
-		Message *struct {
-			Usage *anthropicUsage `json:"usage"`
-		} `json:"message"`
-		Usage *anthropicUsage `json:"usage"`
+// decodeEvent decodes the data of one event as an object and returns it with its type member.
+func decodeEvent(data []byte) (object, string, error) {
+	ev, err := parseObject(data)
+	if err != nil {
+		return nil, "", err
 	}
-	if err := decodeObject(data, &ev); err != nil {
+	typ, err := ev.str("type")
+	if err != nil {
+		return nil, "", err
+	}
+	return ev, typ, nil
+}
+
+func (s *streamState) anthropicEvent(data []byte) error {
+	ev, typ, err := decodeEvent(data)
+	if err != nil {
 		return err
 	}
-	switch ev.Type {
+	switch typ {
 	case "message_start":
-		if s.started || ev.Message == nil {
+		msg, err := ev.child("message")
+		if err != nil {
+			return err
+		}
+		if s.started || msg == nil {
 			return ErrMalformed
 		}
 		s.started = true
-		return s.merge(ev.Message.Usage)
+		return s.merge(msg)
 	case "message_delta":
 		if !s.started {
 			return ErrMalformed
 		}
-		return s.merge(ev.Usage)
+		return s.merge(ev)
 	case "message_stop":
 		if !s.started {
 			return ErrMalformed
@@ -234,22 +253,23 @@ func (s *streamState) anthropicEvent(data []byte) error {
 	return nil
 }
 
-// merge replaces each count of the Anthropic total that the block carries.
-func (s *streamState) merge(au *anthropicUsage) error {
-	if au == nil {
-		return nil
-	}
-	if err := firstErr(au.InputTokens, au.OutputTokens, au.CacheCreationInputTokens, au.CacheReadInputTokens); err != nil {
+// merge replaces each count of the Anthropic total that the usage member of parent carries.
+func (s *streamState) merge(parent object) error {
+	block, err := parent.child("usage")
+	if err != nil {
 		return err
 	}
-	for _, p := range []struct{ from, to *count }{
-		{&au.InputTokens, &s.acc.InputTokens},
-		{&au.OutputTokens, &s.acc.OutputTokens},
-		{&au.CacheCreationInputTokens, &s.acc.CacheCreationInputTokens},
-		{&au.CacheReadInputTokens, &s.acc.CacheReadInputTokens},
-	} {
-		if p.from.set {
-			*p.to = *p.from
+	au, err := readAnthropicUsage(block)
+	if err != nil || au == nil {
+		return err
+	}
+	from := au.counts()
+	if err := firstErr(from...); err != nil {
+		return err
+	}
+	for i, to := range s.acc.counts() {
+		if from[i].set {
+			*to = *from[i]
 		}
 	}
 	s.seen = true
@@ -261,20 +281,18 @@ func (s *streamState) chatEvent(data []byte) error {
 		s.done = true
 		return nil
 	}
-	var chunk struct {
-		Usage *openAIUsage    `json:"usage"`
-		Error json.RawMessage `json:"error"`
-	}
-	if err := decodeObject(data, &chunk); err != nil {
+	chunk, err := parseObject(data)
+	if err != nil {
 		return err
 	}
-	if len(chunk.Error) > 0 && !bytes.Equal(chunk.Error, []byte("null")) {
+	if raw, ok := chunk["error"]; ok && !bytes.Equal(raw, []byte("null")) {
 		return ErrTruncated
 	}
-	if chunk.Usage == nil {
-		return nil
+	block, err := chunk.child("usage")
+	if err != nil || block == nil {
+		return err
 	}
-	u, err := openAIOf(chunk.Usage, OpenAIChat, s.maxTokens)
+	u, err := usageOf(block, OpenAIChat, s.maxTokens)
 	if err != nil {
 		return err
 	}
@@ -283,21 +301,24 @@ func (s *streamState) chatEvent(data []byte) error {
 }
 
 func (s *streamState) responsesEvent(data []byte) error {
-	var ev struct {
-		Type     string `json:"type"`
-		Response *struct {
-			Usage *openAIUsage `json:"usage"`
-		} `json:"response"`
-	}
-	if err := decodeObject(data, &ev); err != nil {
+	ev, typ, err := decodeEvent(data)
+	if err != nil {
 		return err
 	}
-	switch ev.Type {
+	switch typ {
 	case "response.completed", "response.incomplete", "response.failed":
-		if ev.Response == nil {
+		resp, err := ev.child("response")
+		if err != nil {
+			return err
+		}
+		if resp == nil {
 			return ErrMalformed
 		}
-		u, err := openAIOf(ev.Response.Usage, OpenAIResponses, s.maxTokens)
+		block, err := resp.child("usage")
+		if err != nil {
+			return err
+		}
+		u, err := usageOf(block, OpenAIResponses, s.maxTokens)
 		if err != nil {
 			return err
 		}

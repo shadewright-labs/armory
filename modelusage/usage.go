@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strconv"
 )
@@ -123,13 +124,14 @@ var (
 	ErrTooLarge = errors.New("modelusage: the reply is larger than the byte limit")
 	// ErrLineTooLong matches a *LimitError for a stream line longer than Limits.MaxLineBytes.
 	ErrLineTooLong = errors.New("modelusage: a stream line is longer than the line limit")
-	// ErrMalformed is returned for a reply that is not valid JSON or not a valid stream of the family.
+	// ErrMalformed is returned for a reply that is not valid JSON or not a valid stream of the family, for a
+	// member name that appears twice in one object, and for a count that is not an integer.
 	ErrMalformed = errors.New("modelusage: the reply is malformed")
 	// ErrNoUsage is returned for a reply without a usage block, or one without both its input and output
 	// counts.
 	ErrNoUsage = errors.New("modelusage: the reply has no usage")
-	// ErrOutOfRange is returned for a count that is negative, not an integer, above Limits.MaxTokens, or
-	// larger than the count it is a part of.
+	// ErrOutOfRange is returned for a count that is negative, above Limits.MaxTokens, or larger than the
+	// count it is a part of. A count that is not an integer is ErrMalformed.
 	ErrOutOfRange = errors.New("modelusage: a usage count is out of range")
 	// ErrTruncated matches a *TruncatedError: a stream that ended, failed or reported an error before its
 	// final event.
@@ -213,67 +215,161 @@ type count struct {
 	err error
 }
 
-// UnmarshalJSON accepts null (left unset) and integers only. A fraction, an exponent or a string is
-// ErrMalformed, a negative or too large integer ErrOutOfRange. It never fails the decoding itself, so that
-// the caller decides which error wins.
-func (c *count) UnmarshalJSON(b []byte) error {
-	*c = count{}
-	if bytes.Equal(b, []byte("null")) {
-		return nil
+// parseCount accepts null (left unset) and integers only. A fraction, an exponent, a string or any other
+// value is ErrMalformed, a negative or too large integer ErrOutOfRange. The error is kept in the count, so
+// that the caller decides which error wins.
+func parseCount(raw json.RawMessage) count {
+	if bytes.Equal(raw, []byte("null")) {
+		return count{}
 	}
-	c.set = true
-	if len(b) == 0 || (b[0] != '-' && (b[0] < '0' || b[0] > '9')) || bytes.ContainsAny(b, ".eE") {
-		c.err = ErrMalformed
-		return nil
-	}
-	n, err := strconv.ParseInt(string(b), 10, 64)
+	// ParseInt takes only an optional sign and decimal digits, so it refuses every JSON value that is not an
+	// integer; JSON itself has no leading plus sign.
+	n, err := strconv.ParseInt(string(raw), 10, 64)
 	switch {
-	case err != nil && errors.Is(err, strconv.ErrRange):
-		c.err = ErrOutOfRange
+	case errors.Is(err, strconv.ErrRange):
+		return count{set: true, err: ErrOutOfRange}
 	case err != nil:
-		c.err = ErrMalformed
+		return count{set: true, err: ErrMalformed}
 	case n < 0:
-		c.err = ErrOutOfRange
-	default:
-		c.n = n
+		return count{set: true, err: ErrOutOfRange}
 	}
-	return nil
+	return count{n: n, set: true}
+}
+
+// object is one JSON object of a reply, its members by their exact name.
+type object map[string]json.RawMessage
+
+// parseObject decodes data, which must be one JSON object and nothing more. A member name that appears twice
+// is ErrMalformed, so two usage blocks never merge and a count is never read from the second of two keys.
+// Names are matched exactly by the callers, never ignoring case.
+func parseObject(data []byte) (object, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, ErrMalformed
+	}
+	o := object{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, ErrMalformed
+		}
+		name, ok := tok.(string)
+		if !ok {
+			return nil, ErrMalformed
+		}
+		if _, dup := o[name]; dup {
+			return nil, ErrMalformed
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, ErrMalformed
+		}
+		o[name] = raw
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return nil, ErrMalformed
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, ErrMalformed
+	}
+	return o, nil
+}
+
+// child returns the member name as an object, or nil when it is absent or null. Any other value is
+// ErrMalformed.
+func (o object) child(name string) (object, error) {
+	raw, ok := o[name]
+	if !ok || bytes.Equal(raw, []byte("null")) {
+		return nil, nil
+	}
+	return parseObject(raw)
+}
+
+// count returns the member name as a count, unset when it is absent or null.
+func (o object) count(name string) count {
+	raw, ok := o[name]
+	if !ok {
+		return count{}
+	}
+	return parseCount(raw)
+}
+
+// str returns the member name as a string, empty when it is absent or null. Any other value is ErrMalformed.
+func (o object) str(name string) (string, error) {
+	raw, ok := o[name]
+	if !ok || bytes.Equal(raw, []byte("null")) {
+		return "", nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", ErrMalformed
+	}
+	return s, nil
 }
 
 // anthropicUsage is Anthropic's usage block, in a reply and in the message_start and message_delta events.
 type anthropicUsage struct {
-	InputTokens              count `json:"input_tokens"`
-	OutputTokens             count `json:"output_tokens"`
-	CacheCreationInputTokens count `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     count `json:"cache_read_input_tokens"`
+	InputTokens              count
+	OutputTokens             count
+	CacheCreationInputTokens count
+	CacheReadInputTokens     count
 }
 
-// openAIUsage is the usage block of both OpenAI APIs. Chat completions name the counts prompt_tokens and
-// completion_tokens, the Responses API input_tokens and output_tokens; usageOf reads the pair of the family.
-type openAIUsage struct {
-	PromptTokens        count `json:"prompt_tokens"`
-	CompletionTokens    count `json:"completion_tokens"`
-	PromptTokensDetails *struct {
-		CachedTokens     count `json:"cached_tokens"`
-		CacheWriteTokens count `json:"cache_write_tokens"`
-	} `json:"prompt_tokens_details"`
-	CompletionTokensDetails *struct {
-		ReasoningTokens count `json:"reasoning_tokens"`
-	} `json:"completion_tokens_details"`
+// counts lists every count of the block, in a fixed order.
+func (au *anthropicUsage) counts() []*count {
+	return []*count{&au.InputTokens, &au.OutputTokens, &au.CacheCreationInputTokens, &au.CacheReadInputTokens}
+}
 
-	InputTokens        count `json:"input_tokens"`
-	OutputTokens       count `json:"output_tokens"`
-	InputTokensDetails *struct {
-		CachedTokens     count `json:"cached_tokens"`
-		CacheWriteTokens count `json:"cache_write_tokens"`
-	} `json:"input_tokens_details"`
-	OutputTokensDetails *struct {
-		ReasoningTokens count `json:"reasoning_tokens"`
-	} `json:"output_tokens_details"`
+// readAnthropicUsage reads the usage block o, which may be nil.
+func readAnthropicUsage(o object) (*anthropicUsage, error) {
+	if o == nil {
+		return nil, nil
+	}
+	au := &anthropicUsage{
+		InputTokens:              o.count("input_tokens"),
+		OutputTokens:             o.count("output_tokens"),
+		CacheCreationInputTokens: o.count("cache_creation_input_tokens"),
+		CacheReadInputTokens:     o.count("cache_read_input_tokens"),
+	}
+	return au, nil
+}
+
+// openAIUsage is the usage block of one of the OpenAI APIs, read under the names of its family.
+type openAIUsage struct {
+	in, out, cached, written, reasoning count
+}
+
+// readOpenAIUsage reads the usage block o of family f, which may be nil. Chat completions name the counts
+// prompt_tokens and completion_tokens with prompt_tokens_details and completion_tokens_details, the Responses
+// API input_tokens and output_tokens with input_tokens_details and output_tokens_details.
+func readOpenAIUsage(o object, f Family) (*openAIUsage, error) {
+	if o == nil {
+		return nil, nil
+	}
+	inName, outName := "input_tokens", "output_tokens"
+	if f == OpenAIChat {
+		inName, outName = "prompt_tokens", "completion_tokens"
+	}
+	inDetails, err := o.child(inName + "_details")
+	if err != nil {
+		return nil, err
+	}
+	outDetails, err := o.child(outName + "_details")
+	if err != nil {
+		return nil, err
+	}
+	ou := &openAIUsage{in: o.count(inName), out: o.count(outName)}
+	if inDetails != nil {
+		ou.cached, ou.written = inDetails.count("cached_tokens"), inDetails.count("cache_write_tokens")
+	}
+	if outDetails != nil {
+		ou.reasoning = outDetails.count("reasoning_tokens")
+	}
+	return ou, nil
 }
 
 // firstErr returns the first refusal among the counts, or nil.
-func firstErr(cs ...count) error {
+func firstErr(cs ...*count) error {
 	for _, c := range cs {
 		if c.err != nil {
 			return c.err
@@ -287,8 +383,7 @@ func anthropicOf(au *anthropicUsage, maxTokens int64) (Usage, error) {
 	if au == nil {
 		return Usage{}, ErrNoUsage
 	}
-	if err := firstErr(au.InputTokens, au.OutputTokens, au.CacheCreationInputTokens,
-		au.CacheReadInputTokens); err != nil {
+	if err := firstErr(au.counts()...); err != nil {
 		return Usage{}, err
 	}
 	if !au.InputTokens.set || !au.OutputTokens.set {
@@ -312,37 +407,19 @@ func openAIOf(ou *openAIUsage, f Family, maxTokens int64) (Usage, error) {
 	if ou == nil {
 		return Usage{}, ErrNoUsage
 	}
-	in, out := ou.PromptTokens, ou.CompletionTokens
-	var cached, written, reasoning count
-	if f == OpenAIChat {
-		if d := ou.PromptTokensDetails; d != nil {
-			cached, written = d.CachedTokens, d.CacheWriteTokens
-		}
-		if d := ou.CompletionTokensDetails; d != nil {
-			reasoning = d.ReasoningTokens
-		}
-	} else {
-		in, out = ou.InputTokens, ou.OutputTokens
-		if d := ou.InputTokensDetails; d != nil {
-			cached, written = d.CachedTokens, d.CacheWriteTokens
-		}
-		if d := ou.OutputTokensDetails; d != nil {
-			reasoning = d.ReasoningTokens
-		}
-	}
-	if err := firstErr(in, out, cached, written, reasoning); err != nil {
+	if err := firstErr(&ou.in, &ou.out, &ou.cached, &ou.written, &ou.reasoning); err != nil {
 		return Usage{}, err
 	}
-	if !in.set || !out.set {
+	if !ou.in.set || !ou.out.set {
 		return Usage{}, ErrNoUsage
 	}
 	u := Usage{
 		Family:                 f,
-		InputTokens:            in.n,
-		OutputTokens:           out.n,
-		CachedPromptTokens:     cached.n,
-		CacheWritePromptTokens: written.n,
-		ReasoningTokens:        reasoning.n,
+		InputTokens:            ou.in.n,
+		OutputTokens:           ou.out.n,
+		CachedPromptTokens:     ou.cached.n,
+		CacheWritePromptTokens: ou.written.n,
+		ReasoningTokens:        ou.reasoning.n,
 	}
 	if err := u.validate(maxTokens); err != nil {
 		return Usage{}, err
@@ -367,18 +444,6 @@ func (u Usage) validate(maxTokens int64) error {
 	}
 	if u.ReasoningTokens > u.OutputTokens {
 		return ErrOutOfRange
-	}
-	return nil
-}
-
-// decodeObject decodes data, which must be one JSON object, into v. Anything else is ErrMalformed.
-func decodeObject(data []byte, v any) error {
-	t := bytes.TrimSpace(data)
-	if len(t) == 0 || t[0] != '{' {
-		return ErrMalformed
-	}
-	if err := json.Unmarshal(t, v); err != nil {
-		return ErrMalformed
 	}
 	return nil
 }
