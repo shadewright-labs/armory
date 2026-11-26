@@ -42,16 +42,19 @@ var (
 	// the call. Neither the check's text nor its error is kept; a valid [Refusal] class is.
 	ErrStoppedBeforeWrite = errors.New("stopped before the write")
 	// ErrOutcomeUnknown means an attempt of a write may have reached the host and its answer was lost or
-	// was a failure that does not say the write was refused (a network error, a timeout, 408 or 5xx).
+	// was a failure that does not say the write was refused (a network error, a timeout, 3xx, 408 or 5xx).
 	// Every later failure in the same call (a refused check, a credential error, the end of the context,
 	// a status, the last retry, an unusable receipt) keeps this kind next to its own, so a caller never
 	// reads it as "nothing was written". It never matches ErrRetryable: the caller reads state, then
 	// decides.
 	ErrOutcomeUnknown = errors.New("outcome of the write unknown")
 	// ErrUnusableReceipt means the host accepted a write (a 2xx answer) and the answer could not be used:
-	// it was past the bound, could not be read to the end, or could not be decoded. That attempt's write
-	// happened; what it created or changed is not known. It is never retried, and the caller reads state
-	// to learn the result and must not send the write again.
+	// it was past the bound, could not be read to the end before the attempt deadline, or could not be
+	// decoded. The host accepted that attempt's write (for 202, accepted it for processing, which may not
+	// have completed yet), and what it created or changed is not known. For a 202 or another 2xx where no
+	// body is expected (such as 204), a clean empty answer succeeds when the operation expects none; a
+	// body read failure, timeout or oversized body still returns ErrUnusableReceipt. It is never retried,
+	// and the caller reads state to learn the result and must not send the write again.
 	//
 	// When an earlier attempt of the same call may have reached the host, the error matches
 	// ErrOutcomeUnknown too: at least one write was accepted, and whether the earlier one was also
@@ -74,6 +77,8 @@ type Error struct {
 	Kind error
 }
 
+// Error returns "githost: <Op>" followed by the status (when non-zero) and kind (when non-nil), or
+// "githost: nil error" for a nil *Error.
 func (e *Error) Error() string {
 	if e == nil {
 		return "githost: nil error"
@@ -96,15 +101,20 @@ func (e *Error) Unwrap() error {
 	return e.Kind
 }
 
-// RetryableError is a transient failure, with the delay the host asked for when it asked for one. It
-// matches [ErrRetryable] with [errors.Is].
+// RetryableError is a transient failure, with the delay to wait before retrying when one applies. It
+// matches [ErrRetryable] with [errors.Is], including a nil *RetryableError.
 type RetryableError struct {
-	// RetryAfter is the delay the host asked for; zero when it gave none.
+	// RetryAfter is the delay to wait before retrying, or zero when none applies. On errors from a
+	// client it is the delay the host asked for (Retry-After or rate limit reset), a delay a
+	// [Credential] asked for, or the client's one-minute fallback for a rate limit without a usable
+	// delay. The client caps every delay at one hour.
 	RetryAfter time.Duration
 	// Err is the underlying error.
 	Err error
 }
 
+// Error returns "retryable (after <RetryAfter>): <Err>" when RetryAfter is positive, "retryable: <Err>"
+// otherwise, and "retryable" for a nil *RetryableError.
 func (e *RetryableError) Error() string {
 	if e == nil {
 		return "retryable"
@@ -123,7 +133,8 @@ func (e *RetryableError) Unwrap() error {
 	return e.Err
 }
 
-// Is reports whether target is [ErrRetryable].
+// Is reports whether target is [ErrRetryable]. It returns true for ErrRetryable even on a nil
+// *RetryableError.
 func (e *RetryableError) Is(target error) bool { return target == ErrRetryable }
 
 // maxRefusalClass bounds the length of a [Refusal] class.
@@ -135,7 +146,9 @@ const maxRefusalClass = 32
 // that class, found with [errors.As]. Nothing else of the check's error is kept, and an invalid class
 // is dropped.
 //
-// Provisional: it belongs to the check before a write, whose name and shape are still being designed.
+// The write check interface itself (its name and signature) is provisional and still being designed.
+// What is fixed: the check runs on every attempt of a write (retries included), a refusal stops the
+// send, and a refusal carries only a pattern-checked class.
 type Refusal struct {
 	// Class is a short constant the product chose: 1 to 32 lowercase ASCII letters, digits and dashes.
 	Class string

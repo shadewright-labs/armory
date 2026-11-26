@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// wireContext is the context of a request on the wire: it ends when the call's context ends, with the
-// same error and deadline, and returns no value.
+// wireContext is the context of a request on the wire: it ends when its parent context (the attempt's
+// context) ends, with the same error and deadline, and returns no value.
 //
 // A client trace (net/http/httptrace) and a dial trace live in context values that net/http and net
 // read from the request's context. httptrace.WithClientTrace composes a new trace with the one already
@@ -15,7 +15,7 @@ import (
 // every key is the only one under which no caller hook can see the request, its Authorization header
 // included.
 //
-// It has an AfterFunc method, so contexts that net/http derives from it register with the call's
+// It has an AfterFunc method, so contexts that net/http derives from it register with the parent
 // context instead of starting a goroutine each.
 type wireContext struct {
 	call context.Context

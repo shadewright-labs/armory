@@ -34,7 +34,8 @@
 //   - once an attempt of a write may have reached the host without an answer that says it did not
 //     write, returns every later failure of the call as githost.ErrOutcomeUnknown next to its own kind,
 //     an unusable receipt included. An answer that says the write was refused (a 4xx, a rate limit)
-//     keeps saying so when the call's context ends right after it arrives;
+//     keeps the outcome known (without githost.ErrOutcomeUnknown) when the call's context ends right
+//     after it arrives;
 //   - calls the write check before every attempt of a write, and sends nothing more when it refuses;
 //   - builds error text from fixed words, the operation label, the status code and a valid refusal class
 //     only, never from a body, URL, header, token or a wrapped error of another package or a callback;
@@ -101,7 +102,8 @@ const (
 	DefaultMaxWait        = 15 * time.Second
 	DefaultTimeout        = 2 * time.Minute
 	DefaultAttemptTimeout = 60 * time.Second
-	// DefaultBodyLimit bounds a JSON answer when the request sets no lower bound.
+	// DefaultBodyLimit is the default bound of a 2xx answer body when Config.BodyLimit and Request.Limit
+	// are not set.
 	DefaultBodyLimit = 2 << 20
 )
 
@@ -160,8 +162,8 @@ type Config struct {
 	Host string
 	// Repo is the repository tokens are asked for.
 	Repo githost.RepoRef
-	// Credential returns a token for each attempt, retries included. Required: nil, or a nil function or
-	// pointer behind the interface, is refused.
+	// Credential returns a token for each attempt, retries included. Required: nil, or any typed nil
+	// (function, pointer, map, slice, channel or interface) behind the interface, is refused.
 	Credential githost.Credential
 	// WriteCheck is called before each attempt of a write. Nil allows no write.
 	WriteCheck WriteCheck
@@ -236,15 +238,16 @@ type Request struct {
 	Body        []byte
 	ContentType string // sent when Body is set; empty means application/json
 	Accept      string
-	IfNoneMatch string // sent as If-None-Match, so an unchanged answer is a 304
+	IfNoneMatch string // sent as If-None-Match; for GET and HEAD, a 304 comes back as a Response
 	Limit       int64  // bound of the 2xx body in bytes; zero or less means the client's default
 	// Idempotent marks a write that may be sent again in the call, such as a content-addressed object or a
 	// ref move with an expected old value. Reads are always retried; a write without it is sent once.
 	Idempotent bool
 }
 
-// Response is an answer whose status is not a transient failure. Body is read for 2xx only; any other
-// status comes back without a body, for the host client to classify with [StatusError].
+// Response is a non-error answer from [Client.Do]: a 2xx, a 304 to a conditional GET or HEAD, or a
+// non-rate-limit 4xx (or other non-3xx, non-5xx status). Body is read for non-HEAD 2xx answers only;
+// any other status comes back without a body, for the host client to classify with [StatusError].
 type Response struct {
 	Status int
 	Header http.Header
@@ -809,9 +812,9 @@ func mentionsRateLimit(r io.Reader) bool {
 	return strings.Contains(s, "rate limit") || strings.Contains(s, "abuse detection")
 }
 
-// backoff waits before the attempt after attempt: the delay the host asked for, or an exponential one
-// with jitter. It returns err when the host asked for more than maxWait or the wait would pass the
-// deadline of ctx, and the end of ctx when it has ended or ends during the wait.
+// backoff waits before the attempt after attempt: the delay asked for in err, or an exponential one
+// with jitter. It returns err when the asked delay exceeds maxWait or the wait would pass the deadline
+// of ctx, and the end of ctx when it has ended or ends during the wait.
 func (c *Client) backoff(ctx context.Context, op string, attempt int, err error) error {
 	if ctx.Err() != nil {
 		// The context ended during the attempt or the Observer: the call is over.

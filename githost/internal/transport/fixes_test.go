@@ -51,18 +51,20 @@ func TestRedirectOnWrite(t *testing.T) {
 // If-Modified-Since. Any other 304 is an error with its status.
 func TestNotModifiedOnlyConditional(t *testing.T) {
 	cases := []struct {
-		name   string
-		method string
-		inm    string
-		header http.Header
-		ok     bool
+		name    string
+		method  string
+		inm     string
+		header  http.Header
+		ok      bool
+		unknown bool
 	}{
-		{"GET with If-None-Match", http.MethodGet, `"v1"`, nil, true},
-		{"HEAD with If-None-Match", http.MethodHead, `"v1"`, nil, true},
+		{"GET with If-None-Match", http.MethodGet, `"v1"`, nil, true, false},
+		{"HEAD with If-None-Match", http.MethodHead, `"v1"`, nil, true, false},
 		{"GET with If-Modified-Since", http.MethodGet, "",
-			http.Header{"If-Modified-Since": {"Wed, 25 Nov 2026 12:00:00 GMT"}}, true},
-		{"GET unconditional", http.MethodGet, "", nil, false},
-		{"HEAD unconditional", http.MethodHead, "", nil, false},
+			http.Header{"If-Modified-Since": {"Wed, 25 Nov 2026 12:00:00 GMT"}}, true, false},
+		{"GET unconditional", http.MethodGet, "", nil, false, false},
+		{"HEAD unconditional", http.MethodHead, "", nil, false, false},
+		{"POST with If-None-Match", http.MethodPost, `"v1"`, nil, false, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -81,8 +83,8 @@ func TestNotModifiedOnlyConditional(t *testing.T) {
 			}
 			var he *githost.Error
 			if !errors.As(err, &he) || he.Status != http.StatusNotModified || errors.Is(err, githost.ErrRetryable) ||
-				errors.Is(err, githost.ErrOutcomeUnknown) || resp.Status != 0 {
-				t.Fatalf("Do = %+v, %v; want a status 304 error", resp, err)
+				errors.Is(err, githost.ErrOutcomeUnknown) != c.unknown || resp.Status != 0 {
+				t.Fatalf("Do = %+v, %v; want a status 304 error (unknown=%v)", resp, err, c.unknown)
 			}
 			if n := s.hits.Load(); n != 1 {
 				t.Errorf("host got %d requests, want 1", n)

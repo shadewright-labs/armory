@@ -14,9 +14,10 @@ import (
 // the write check. Host packages declare each template as a constant.
 //
 // Do refuses a request whose template does not name its path: a fixed segment (lowercase ASCII letters,
-// digits, ".", "_" and "-") must equal the path's segment, "{name}" stands for one non-empty segment,
-// and a final "{name...}" for one or more. So the template holds no value of the request beyond its
-// fixed segments, and no raw path reaches the Observer or the write check through it.
+// digits, ".", "_" and "-", except "." and "..") must equal the path's segment, "{name}" (lowercase
+// ASCII letters and "_") stands for one non-empty segment, and a final "{name...}" for one or more. So
+// the template holds no value of the request beyond its fixed segments, and no raw path reaches the
+// Observer or the write check through it.
 type Template string
 
 // names reports whether t names path.
@@ -108,10 +109,11 @@ const (
 // Only the page number is read from the link; its URL is never followed or kept. ok is false on the
 // last page.
 //
-// A link off the pinned origin, a second rel="next" link, a missing, repeated or malformed page number
-// (only 1 to maxPage, in decimal without sign or leading zero), or a page that is not the current one
-// plus one (a skip, a repeat or a step back, so no sequence of pages can cycle) is
-// githost.ErrUntrustedAnswer. A request whose own page number is malformed is githost.ErrRejected.
+// An unbalanced bracket or quote in a Link header, a link off the pinned origin, a second rel="next"
+// link, a missing, repeated or malformed page number (only 1 to maxPage, in decimal without sign or
+// leading zero), or a page that is not the current one plus one (a skip, a repeat or a step back, so no
+// sequence of pages can cycle) is githost.ErrUntrustedAnswer. A request whose own page number is
+// repeated or malformed is githost.ErrRejected.
 func (c *Client) NextPage(r Request, h http.Header) (next Request, ok bool, err error) {
 	current := 1
 	if vs, has := r.Query[pageParam]; has {

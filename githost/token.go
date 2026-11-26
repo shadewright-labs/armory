@@ -21,10 +21,12 @@ const (
 // placeholder is what a Token prints, formats and marshals as.
 const placeholder = "[redacted token]"
 
-// Token is a short-lived secret for one host. It prints, formats and marshals as a placeholder with every
-// verb and encoder. No exported function or method returns its value or writes it anywhere: the
-// package's own transport sets it in the Authorization header of a request, after it has checked the
-// request's scheme and host against the one origin the client is pinned to.
+// Token is a short-lived secret for one host. It never reveals its value: it prints and formats as a
+// placeholder with every fmt verb except %T (which prints the type name) and %p on a pointer (which
+// prints the address), and marshals as a placeholder with JSON and text encoders (gob refuses it as
+// having no exported fields). No exported function or method returns its value or writes it anywhere:
+// the package's own transport sets it in the Authorization header of a request, after it has checked
+// the request against the one https origin the client is pinned to.
 //
 // When a Token is an unexported field of another struct, fmt walks that struct without calling Token's
 // methods. A pointer is not enough to hide the value then: with a verb a pointer does not take, such as
@@ -50,7 +52,7 @@ func init() {
 	}
 }
 
-// NewToken wraps value. The product builds tokens; a client asks for one per request and drops it.
+// NewToken wraps value. The product builds tokens; a client asks for one before each attempt and drops it.
 func NewToken(s Scheme, value string, expires time.Time) Token {
 	return Token{s: &tokenData{scheme: s, expires: expires, value: func() string { return value }}}
 }
@@ -69,10 +71,12 @@ func (t Token) Expires() time.Time {
 // String returns a placeholder.
 func (Token) String() string { return placeholder }
 
-// GoString returns a placeholder, for %#v.
+// GoString returns a placeholder wrapped in the type name. Because Token also implements
+// [fmt.Formatter], fmt uses Format rather than GoString for %#v.
 func (Token) GoString() string { return "githost.Token{" + placeholder + "}" }
 
-// Format prints a placeholder for every verb and flag.
+// Format writes a placeholder for every verb and flag passed to it. Note that fmt handles %T (type
+// name) and %p on a *Token (address) without calling Format.
 func (Token) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(placeholder)) }
 
 // MarshalJSON returns a placeholder as a JSON string.

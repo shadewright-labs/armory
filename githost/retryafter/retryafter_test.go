@@ -1,8 +1,10 @@
 package retryafter
 
 import (
+	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -91,35 +93,106 @@ func TestHeader(t *testing.T) {
 	}
 }
 
-// FuzzParse: no input panics, and every delay lies between zero and the cap.
+// FuzzParse: no input panics, and for any string, clock and cap, Parse and ParseReset never return
+// a negative delay or one above the cap, and integer seconds past the cap always return the cap.
 func FuzzParse(f *testing.F) {
-	for _, s := range []string{"", "7", "-1", "9223372036854775807", now.Format(http.TimeFormat), "Sun, 06 Nov 1994"} {
-		f.Add(s, now.Unix(), int64(time.Hour))
+	const maxDelay = 10 * time.Minute
+	values := []string{
+		"", "7", " 7 ", "0", "-5", "-1", "1.5", "600", "601", "99999999999999",
+		"9223372036854775807", "9223372036854775808", "99999999999999999999999999999999",
+		"3600", "3599", "+7", "-0", "+0", "-9223372036854775808", "0x10", "7 7", "٧", "0007",
+		unusable,
+		now.Format(http.TimeFormat),
+		now.Add(20 * time.Second).Format(http.TimeFormat),
+		now.Add(time.Hour).Format(http.TimeFormat),
+		now.Add(-time.Minute).Format(http.TimeFormat),
+		now.Add(20 * time.Second).Format(time.RFC850),
+		"Sun, 06 Nov 1994",
 	}
-	f.Fuzz(func(t *testing.T, v string, nowUnix, maxDelay int64) {
-		at := time.Unix(nowUnix, 0)
-		d := Parse(v, at, time.Duration(maxDelay))
-		if d < 0 || (maxDelay <= 0 && d != 0) || (maxDelay > 0 && d > time.Duration(maxDelay)) {
-			t.Fatalf("Parse(%q, %d, %d) = %d", v, nowUnix, maxDelay, d)
+	for _, s := range values {
+		f.Add(s, now.Unix(), int64(0), int64(maxDelay))
+	}
+	f.Add("7", now.Unix(), int64(0), int64(0))
+	f.Add("7", now.Unix(), int64(0), int64(-1))
+	f.Add("9223372036854775808", now.Unix(), int64(900_000_000), int64(math.MaxInt64))
+	f.Add("2", int64(1), int64(900_000_000), int64(500*time.Millisecond))
+	f.Add("1", int64(math.MinInt64), int64(0), int64(time.Hour))
+	f.Fuzz(func(t *testing.T, v string, nowUnix, nowNsec, capNs int64) {
+		at := time.Unix(nowUnix, nowNsec)
+		capDur := time.Duration(capNs)
+		d := Parse(v, at, capDur)
+		if d < 0 || (capDur <= 0 && d != 0) || (capDur > 0 && d > capDur) {
+			t.Fatalf("Parse(%q, %v, %d) = %d", v, at, capDur, d)
+		}
+		if capDur > 0 {
+			if secs, ok := digits(strings.TrimSpace(v)); ok {
+				if secs > int64(capDur/time.Second) && d != capDur {
+					t.Fatalf("Parse(%q, %v, %d) = %d, want cap %d", v, at, capDur, d, capDur)
+				}
+			}
+		}
+		r := ParseReset(v, at, capDur)
+		if r < 0 || (capDur <= 0 && r != 0) || (capDur > 0 && r > capDur) {
+			t.Fatalf("ParseReset(%q, %v, %d) = %d", v, at, capDur, r)
 		}
 	})
 }
 
-// FuzzHeader: the rate limit headers give a delay between zero and the cap, whatever they hold.
+// FuzzHeader: for any header strings, clock and cap, Header never panics and never returns a negative
+// delay or one above the cap.
 func FuzzHeader(f *testing.F) {
-	f.Add("", "0", strconv.FormatInt(now.Unix()+30, 10), now.Unix(), int64(time.Hour))
-	f.Add("12", "0", "1", now.Unix(), int64(time.Minute))
-	f.Add("", "0", "-9223372036854775808", int64(-1), int64(time.Hour))
-	f.Fuzz(func(t *testing.T, retry, remaining, reset string, nowUnix, maxDelay int64) {
+	reset := func(d time.Duration) string { return strconv.FormatInt(now.Add(d).Unix(), 10) }
+	seeds := []struct {
+		retry, remaining, reset string
+		nowUnix, nowNsec        int64
+		capDur                  time.Duration
+	}{
+		{"", "", "", now.Unix(), 0, time.Hour},
+		{"12", "", "", now.Unix(), 0, time.Hour},
+		{"999999", "", "", now.Unix(), 0, time.Hour},
+		{now.Add(20 * time.Second).Format(http.TimeFormat), "", "", now.Unix(), 0, time.Hour},
+		{"3", "0", reset(time.Minute), now.Unix(), 0, time.Hour},
+		{"", "0", reset(45 * time.Second), now.Unix(), 0, time.Hour},
+		{"", "0", reset(48 * time.Hour), now.Unix(), 0, time.Hour},
+		{"", "0", "9223372036854775807", now.Unix(), 0, time.Hour},
+		{"", "0", "9223372036854775808", now.Unix(), 0, time.Hour},
+		{"", "0", reset(-time.Minute), now.Unix(), 0, time.Hour},
+		{"", "0", unusable, now.Unix(), 0, time.Hour},
+		{"", "10", reset(time.Minute), now.Unix(), 0, time.Hour},
+		{"0", "0", reset(time.Minute), now.Unix(), 0, time.Hour},
+		{unusable, "0", reset(45 * time.Second), now.Unix(), 0, time.Hour},
+		{"-5", "0", reset(45 * time.Second), now.Unix(), 0, time.Hour},
+		{"+7", "0", reset(45 * time.Second), now.Unix(), 0, time.Hour},
+		{"-0", "0", reset(45 * time.Second), now.Unix(), 0, time.Hour},
+		{"3", "0", unusable, now.Unix(), 0, time.Hour},
+		{unusable, "0", "later", now.Unix(), 0, time.Hour},
+		{unusable, "10", reset(time.Minute), now.Unix(), 0, time.Hour},
+		{"", "0", "-9223372036854775808", 1, 0, time.Hour},
+		{"", "0", "1", math.MinInt64, 0, time.Hour},
+		{"", "0", "2", 1, 900_000_000, 500 * time.Millisecond},
+		{"", "0", "3", 1, 900_000_000, 2 * time.Second},
+		{"", "0", "1", 1, 900_000_000, time.Hour},
+		{"", "0", "+7", 1, 0, time.Hour},
+		{"", "0", "2", 1, 0, 300 * time.Millisecond},
+		{"", "0", "9223372036854775808", 0, 0, math.MaxInt64},
+		{"12", "0", "1", now.Unix(), 0, 0},
+		{"12", "0", "1", now.Unix(), 0, -time.Second},
+	}
+	for _, s := range seeds {
+		f.Add(s.retry, s.remaining, s.reset, s.nowUnix, s.nowNsec, int64(s.capDur))
+	}
+	f.Fuzz(func(t *testing.T, retry, remaining, reset string, nowUnix, nowNsec, capNs int64) {
 		h := http.Header{}
 		if retry != "" {
 			h.Set(hRetry, retry)
 		}
 		h.Set(hRemaining, remaining)
 		h.Set(hReset, reset)
-		d := Header(h, time.Unix(nowUnix, 0), time.Duration(maxDelay))
-		if d < 0 || (maxDelay <= 0 && d != 0) || (maxDelay > 0 && d > time.Duration(maxDelay)) {
-			t.Fatalf("Header(%q, %q, %q) = %d", retry, remaining, reset, d)
+		at := time.Unix(nowUnix, nowNsec)
+		capDur := time.Duration(capNs)
+		d := Header(h, at, capDur)
+		if d < 0 || (capDur <= 0 && d != 0) || (capDur > 0 && d > capDur) {
+			t.Fatalf("Header(%q, %q, %q, %v, %d) = %d", retry, remaining, reset, at, capDur, d)
 		}
 	})
 }
@@ -152,6 +225,15 @@ func TestParseAtTheLimits(t *testing.T) {
 			t.Errorf("parse(%q) = %s, %v; want %s, %v", c.v, d, ok, c.want, c.ok)
 		}
 	}
+	// A cap of math.MaxInt64 must not overflow when multiplying seconds to Duration.
+	for _, v := range []string{"9223372037", "9223372036854775807", "9223372036854775808"} {
+		if d, ok := parse(v, now, math.MaxInt64); d != math.MaxInt64 || !ok {
+			t.Errorf("parse(%q, MaxInt64) = %d, %v; want MaxInt64, true", v, d, ok)
+		}
+	}
+	if d, ok := parse("9223372036", now, math.MaxInt64); d != 9223372036*time.Second || !ok {
+		t.Errorf("parse(9223372036, MaxInt64) = %d, %v", d, ok)
+	}
 }
 
 // TestParseResetAtTheLimits: a reset is measured from now with its sub-second part, never wraps at the
@@ -174,6 +256,9 @@ func TestParseResetAtTheLimits(t *testing.T) {
 		{"past the integer limit", "9223372036854775808", time.Unix(1, 0), time.Hour, time.Hour},
 		{"largest", "9223372036854775807", time.Unix(1, 0), time.Hour, time.Hour},
 		{"cap below a second", "2", time.Unix(1, 0), 300 * time.Millisecond, 300 * time.Millisecond},
+		{"max cap overflow exact", "9223372037", time.Unix(0, 900_000_000), math.MaxInt64, 9223372036*time.Second + 100*time.Millisecond},
+		{"max cap overflow capped", "9223372037", time.Unix(0, 100_000_000), math.MaxInt64, math.MaxInt64},
+		{"max cap huge reset", "9223372036854775808", time.Unix(0, 0), math.MaxInt64, math.MaxInt64},
 	}
 	for _, c := range cases {
 		if got := ParseReset(c.v, c.now, c.maxDelay); got != c.want {

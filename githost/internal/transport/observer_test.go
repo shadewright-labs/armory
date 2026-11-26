@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -310,6 +311,103 @@ func FuzzNextPage(f *testing.F) {
 		}
 		if !reflect.DeepEqual(next, r) {
 			t.Fatalf("NextPage changed the request: %+v", next)
+		}
+	})
+}
+
+// FuzzPathTemplate: path and template validation never panics; any accepted path is absolute, has no
+// query, fragment, backslash, dot segment, empty segment or encoded slash, and builds a URL on the
+// pinned origin.
+func FuzzPathTemplate(f *testing.F) {
+	seeds := [][2]string{
+		{pathThing, template},
+		{"/repos/o/n/contents/a/b/c.txt", tmplContents},
+		{"/repos/o/n/contents/c.txt", tmplContents},
+		{"/rate_limit", "/rate_limit"},
+		{"/repos/o/n/things/" + pathCanary, "/repos/{owner}/{repo}/things/" + pathCanary},
+		{pathThing, "/repos/{owner}/{repo}/things"},
+		{"/repos/o/n/things", template},
+		{"/repos/o/n/stuff/x", template},
+		{pathThing, "repos/{owner}/{repo}/things/{id}"},
+		{pathThing, "/repos/{owner}/{repo}/things/{Id}"},
+		{pathThing, "/repos/{owner}/{repo}/things/{}"},
+		{pathThing, "/repos/{owner}/{repo}/things/{id"},
+		{"/repos/o/n/contents/", tmplContents},
+		{"/repos/o/n/a/b", "/repos/{owner}/{repo}/{path...}/b"},
+		{"/x/y", "/x/{a}?q"},
+		{"/x/y", "/x/{a} "},
+		{"/x/", "/x/"},
+		{"/repos/o/n/things/a%2Fb", template},
+		{"/repos/o/n/things/a%2fb", template},
+		{"/repos/o/n/things/a%5Cb", template},
+		{"/repos/o/n/things/..", template},
+		{"/repos/o/n/things/.", template},
+		{"/repos/o/n/things/%2e%2e", template},
+		{"/repos/o/n/things/%2E", template},
+		{"/repos/o/n/things/.%2e", template},
+		{"/repos/o/n/things/%zz", template},
+		{"/repos/o/n/things/a b", template},
+		{"/repos/o/../things/x", template},
+		{"/repos/o/n/contents/a/../b", tmplContents},
+		{"/repos/o/n/contents/a/./b", tmplContents},
+		{"/repos/o/n/contents/a%2Fb", tmplContents},
+		{"/repos/o/n/contents/..", tmplContents},
+		{"/a/../b", "/a/../b"},
+		{"/a/./b", "/a/./b"},
+		{"/repos/o/n/things/a%20b", template},
+		{"/repos/o/n/things/..a", template},
+		{"@evil.example.test/x", template},
+		{"//evil.example.test/x", template},
+		{"x", template},
+		{"/x?y=1", "/x"},
+		{"/x#y", "/x"},
+		{`/\evil.example.test/x`, template},
+		{evilURL, template},
+		{"/", "/"},
+		{"/a//b", "/a/{b...}"},
+		{"", ""},
+	}
+	for _, s := range seeds {
+		f.Add(s[0], s[1])
+	}
+	c, err := New(Config{Host: apiHost, Credential: githost.CredentialFunc(
+		func(context.Context, githost.Scope) (githost.Token, error) { return githost.Token{}, nil })})
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Fuzz(func(t *testing.T, path, tmpl string) {
+		_ = cleanSegments(path)
+		_ = Template(tmpl).names(path)
+		u, err := c.buildURL(Request{Op: opTest, Method: http.MethodGet, Path: path, Template: Template(tmpl)})
+		if err != nil {
+			if u != nil {
+				t.Fatalf("buildURL(%q, %q) returned URL %v with error %v", path, tmpl, u, err)
+			}
+			return
+		}
+		if u == nil {
+			t.Fatalf("buildURL(%q, %q) returned nil URL without error", path, tmpl)
+		}
+		if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
+			t.Fatalf("accepted non-absolute or scheme-relative path %q", path)
+		}
+		if strings.ContainsAny(path, "?#\\") {
+			t.Fatalf("accepted path with query, fragment or backslash: %q", path)
+		}
+		if !onOrigin(u, apiHost) || u.RawQuery != "" || u.Fragment != "" || u.EscapedPath() != path {
+			t.Fatalf("accepted URL %q off origin or mutated from %q", u.String(), path)
+		}
+		if u2, perr := url.Parse(u.String()); perr != nil || !onOrigin(u2, apiHost) {
+			t.Fatalf("reparsed URL %q off origin: %v", u.String(), perr)
+		}
+		for seg := range strings.SplitSeq(strings.TrimPrefix(path, "/"), "/") {
+			if seg == "" {
+				t.Fatalf("accepted path with empty segment: %q (template %q)", path, tmpl)
+			}
+			dec, perr := url.PathUnescape(seg)
+			if perr != nil || dec == "." || dec == ".." || strings.ContainsAny(dec, "/\\") {
+				t.Fatalf("accepted path with bad segment %q (decoded %q, err %v) in %q", seg, dec, perr, path)
+			}
 		}
 	})
 }

@@ -28,19 +28,24 @@ func Parse(v string, now time.Time, maxDelay time.Duration) time.Duration {
 // or an HTTP date, past dates included.
 func parse(v string, now time.Time, maxDelay time.Duration) (time.Duration, bool) {
 	v = strings.TrimSpace(v)
-	var d time.Duration
 	if secs, ok := digits(v); ok {
-		// Capped in seconds first: a huge value must not overflow the Duration.
-		d = time.Duration(min(secs, int64(max(maxDelay, 0)/time.Second)+1)) * time.Second
-	} else if t, err := http.ParseTime(v); err == nil {
-		d = t.Sub(now)
-	} else {
+		if maxDelay <= 0 {
+			return 0, true
+		}
+		// Compare in seconds first so secs*time.Second cannot overflow Duration, even at math.MaxInt64.
+		if secs > int64(maxDelay/time.Second) {
+			return maxDelay, true
+		}
+		return time.Duration(secs) * time.Second, true
+	}
+	t, err := http.ParseTime(v)
+	if err != nil {
 		return 0, false
 	}
 	if maxDelay <= 0 {
 		return 0, true
 	}
-	return min(max(d, 0), maxDelay), true
+	return min(max(t.Sub(now), 0), maxDelay), true
 }
 
 // digits reads a non-empty run of ASCII digits with no sign. A value past the integer limit is
@@ -84,10 +89,20 @@ func ParseReset(v string, now time.Time, maxDelay time.Duration) time.Duration {
 	// Both are known to be in order, and reset is not negative, so the difference only overflows when
 	// now is far before 1970; it is then past any cap.
 	secs := reset - nowSecs
-	if secs < 0 || secs > int64(maxDelay/time.Second)+1 {
+	maxSecs := int64(maxDelay / time.Second)
+	if secs < 0 || secs > maxSecs+1 {
 		return maxDelay
 	}
-	// secs is small enough here for exact arithmetic in nanoseconds.
+	if secs == maxSecs+1 {
+		// secs*time.Second can overflow when maxDelay is near math.MaxInt64; compute from maxSecs instead.
+		extra := time.Second - time.Duration(now.Nanosecond())
+		base := time.Duration(maxSecs) * time.Second
+		if extra >= maxDelay-base {
+			return maxDelay
+		}
+		return base + extra
+	}
+	// secs <= maxSecs, so secs*time.Second cannot overflow.
 	d := time.Duration(secs)*time.Second - time.Duration(now.Nanosecond())
 	return min(max(d, 0), maxDelay)
 }
