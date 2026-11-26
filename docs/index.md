@@ -1,4 +1,25 @@
-# Armory
+---
+title: Shared Go building blocks for Shadewright Labs products
+hide:
+  - navigation
+  - toc
+---
+
+<div class="arm-hero" markdown>
+
+<h1 class="arm-visually-hidden">Armory</h1>
+
+![Armory by Shadewright Labs](assets/brand/armory-horizontal-dark.svg){ width="222" height="64" }
+
+<p class="arm-lore">The armory is the room of the house where the wrights keep the pieces every one of them needs: the veil that hides what must not be read, the gauge that checks a piece before it leaves the bench, and the chain that records who did what. <a href="https://github.com/shadewright-labs/armory#the-name">The name</a></p>
+
+<p class="arm-tagline">Armory is the Go module that Shadewright Labs products share. Today it reads the token usage a model provider reports; redaction, hygiene checks and audit chains are planned.</p>
+
+[Use it](use.md){ .md-button .md-button--primary }
+[Packages](#packages){ .md-button }
+[GitHub](https://github.com/shadewright-labs/armory){ .md-button }
+
+</div>
 
 Armory is the Go module `github.com/shadewright-labs/armory`. It holds code that more than one Shadewright Labs product needs. Today that is one package, `modelusage`, which reads the token usage a model provider reports. Redaction, hygiene checks and tamper-evident audit chains are planned.
 
