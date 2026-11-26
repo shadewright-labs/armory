@@ -5,11 +5,14 @@ Use an issue in this repository for a bug report or proposal about Armory. Inclu
 ## Making a change
 
 1. Keep each pull request to one issue and link it with `Closes #<number>`.
-2. Follow [AGENTS.md](AGENTS.md) for Conventional Commits, tests and handling sensitive data.
-3. Add or update tests and Go documentation in the same pull request as the code. For a bug fix, include a test that fails before the fix.
-4. Run `go build ./...`, `go vet ./...`, `go test -race ./...`, `golangci-lint run ./...` and `govulncheck ./...` before asking for review. Run `actionlint` for workflow changes.
+2. Follow [AGENTS.md](AGENTS.md): the invariants, Conventional Commits with the allowed scopes, tests and handling sensitive data.
+3. Add or update tests and Go documentation in the same pull request as the code. For a bug fix, include a test that fails before the fix. A new parser comes with a fuzz target and its limits.
+4. Run `go build ./...`, `go vet ./...`, `go test -race -count=1 ./...`, `golangci-lint run ./...` and `govulncheck ./...` before asking for review. For workflow or script changes, also run `actionlint`, `zizmor .github/workflows`, `shellcheck hack/*.sh hack/test/*.sh` and the tests under `hack/test/`.
+5. A new third-party dependency needs its reason in the pull request description (see invariant 2 in AGENTS.md).
 
-CI uploads the coverage profile to Codecov from pull requests in this repository. Coverage is reported only and never fails a check; forks and Dependabot pull requests have no upload token, so they skip the upload.
+CI ends in one required job, `ci-ok`; [docs/ci.md](docs/ci.md) lists what it runs. CI uploads the coverage profile to Codecov from pull requests in this repository. Coverage is reported only and never fails a check; forks and Dependabot pull requests have no upload token, so they skip the upload.
+
+Decisions that fix a package boundary, an API contract, a security rule or a dependency go in an ADR under [docs/adr](docs/adr/README.md) first.
 
 Report vulnerabilities privately using the [security policy](SECURITY.md). See the [code of conduct](CODE_OF_CONDUCT.md) for conduct reports.
 

@@ -14,7 +14,7 @@ body:
     attributes:
       label: Areas
       multiple: true
-      options: [redact, hygiene, audit, docs, ci, deps]
+      options: [modelusage, githost, redact, audit, hygiene, adr, ci, docs, deps, release]
     validations:
       required: true
   - type: textarea

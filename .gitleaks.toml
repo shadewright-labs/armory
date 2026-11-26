@@ -1,0 +1,10 @@
+# gitleaks configuration: the default rules, with no allowlist. Without [extend] useDefault this file would
+# replace the default rules and detect nothing.
+#
+# The history of this repository has no finding, so nothing is allowed. Test fixtures stay free of
+# secret-shaped literals: build a fake token from split strings at run time instead. If an allowlist is ever
+# needed for a value already in the history, each entry allows one exact value (anchored at both ends), in one
+# file, and only in the commits that hold it (condition = "AND", with `commits`), so the same value in a new
+# commit is still reported. hack/test/gitleaks_test.sh enforces that shape and runs the positive controls.
+[extend]
+useDefault = true

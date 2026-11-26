@@ -1,0 +1,18 @@
+Armory
+Copyright 2026 The Shadewright Labs Authors
+
+This repository holds Armory, the shared Go module of Shadewright Labs.
+Source: https://github.com/shadewright-labs/armory
+
+Licensed under the Apache License, Version 2.0 (see LICENSE). Under section 4(d)
+of that license, a redistribution of this work or of a derivative work must
+include a readable copy of the attribution notices in this file.
+
+"Shadewright Labs" and the Shadewright Labs logo are trademarks of Paweł Kalinowski
+(not registered). They are not licensed under the Apache License: section 6
+grants no permission to use them, except as needed to describe the origin of
+the work and to reproduce this file.
+
+The logo image files in this repository (docs/assets/brand/shadewright-labs-dark.svg
+and docs/assets/brand/shadewright-labs-light.svg) are not licensed under the
+Apache License either: Copyright 2026 Paweł Kalinowski, all rights reserved.
