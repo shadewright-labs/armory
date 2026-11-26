@@ -1,16 +1,70 @@
-# armory
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/shadewright-labs-dark.svg">
+    <img src="docs/assets/brand/shadewright-labs-light.svg" alt="Shadewright Labs" width="460">
+  </picture>
+  <br>
+  Armory
+</h1>
 
-[![codecov](https://codecov.io/gh/shadewright-labs/armory/graph/badge.svg)](https://codecov.io/gh/shadewright-labs/armory)
-Shared Go building blocks for Shadewright Labs products: redaction, hygiene checks, tamper-evident audit chains
+<p align="center">
+  <em>The armory is the room of the house where the wrights keep the pieces every one of them needs: the veil that hides what must not be read, the gauge that checks a piece before it leaves the bench, and the chain that records who did what.</em>
+</p>
 
-## Status
+<p align="center">
+  Shared Go building blocks for Shadewright Labs products: redaction, hygiene checks and tamper-evident audit chains. Every product may depend on it, and it depends on none of them.
+</p>
 
-Armory has no packages yet. Redaction will be the first package. Follow the work in [Shadewright issue #1132](https://github.com/shadewright-labs/shadewright/issues/1132).
+<p align="center">
+  <a href="https://github.com/shadewright-labs/armory/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/shadewright-labs/armory/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status on main"></a>
+  <a href="https://codecov.io/gh/shadewright-labs/armory"><img src="https://codecov.io/gh/shadewright-labs/armory/graph/badge.svg" alt="Test coverage on Codecov"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/shadewright-labs/armory" alt="License: Apache-2.0"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/shadewright-labs/armory"><img src="https://api.scorecard.dev/projects/github.com/shadewright-labs/armory/badge" alt="OpenSSF Scorecard"></a>
+</p>
 
-## Contributing
+> [!WARNING]
+> Armory has no packages yet, so there is nothing to import. Redaction will be the first package. Follow the work in [Shadewright issue #1132](https://github.com/shadewright-labs/shadewright/issues/1132).
 
-See the [contributing guide](CONTRIBUTING.md) before opening a pull request.
+## What it will hold
 
-## Security
+| Package | What it is for | State |
+| --- | --- | --- |
+| Redaction | Hiding known secret forms in text from outside a product, in bounded time, before the text reaches a model, storage, logs or a person | Planned, first |
+| Hygiene checks | Checks a repository runs before publishing: emails, local paths and key-shaped literals in tracked files | Planned |
+| Audit chain | Chained audit records, so that an edit, a removed row or a truncated tail is detected | Planned |
 
-Follow the [security policy](SECURITY.md) to report a vulnerability privately.
+These are the parts of the [six shared security laws](https://shadewrightlabs.com/#security-laws) that more than one product needs. Each product keeps its own policy, approvals, tokens and model clients.
+
+## Repositories
+
+| Repository | Contents |
+| --- | --- |
+| [armory](https://github.com/shadewright-labs/armory) | This module |
+| [shadewright](https://github.com/shadewright-labs/shadewright) | The Kubernetes remediation operator |
+| [sablecourt](https://github.com/shadewright-labs/sablecourt) | The control plane for coding agents and deterministic controllers (nothing released yet) |
+| [shadewright-labs.github.io](https://github.com/shadewright-labs/shadewright-labs.github.io) | Website repository. Website: [shadewrightlabs.com](https://shadewrightlabs.com) |
+
+## Development
+
+There is no `go.mod` yet. Once it exists, run these before asking for review:
+
+```bash
+go build ./...
+go vet ./...
+go test -race ./...
+golangci-lint run ./...
+govulncheck ./...
+actionlint          # for workflow changes
+```
+
+CI runs the same Go checks on pull requests and ends in one job, `ci-ok`. It uploads the coverage profile to Codecov, which reports coverage and never fails a check.
+
+Contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md). Coding-agent guide: [AGENTS.md](AGENTS.md). To report a vulnerability privately, follow the [security policy](SECURITY.md).
+
+## The name
+
+An *armory* is where a house keeps the gear its people share. This one holds the code the products share, so that a secret form hidden in one product is hidden the same way in the next.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE).
