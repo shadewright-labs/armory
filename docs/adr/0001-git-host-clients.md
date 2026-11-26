@@ -1,320 +1,163 @@
-# ADR-0001: Package `githost`, a safe client for one Git host origin
+# ADR-0001: Package `githost`, transport and credentials for one Git host origin
 
 - Status: Proposed
 - Date: 2026-11-26
 
-Parts of stage A are built on a branch (the transport, `Token`, the credential interfaces, `retryafter`); nothing is merged. Statements about GitHub cite Shadewright's adapter on `main` or the GitHub REST pages under "Sources". Statements about Azure DevOps cite the Microsoft Learn pages listed there, read on 2026-11-26. A claim marked **spike** must be confirmed against a test repository before code depends on it.
+This record decides what is built on branch `feat/githost-core` of armory and was not contested in three design reviews: the pinned-origin transport, the `Token` type, the credential and signer interfaces, the error kinds and the `retryafter` package. Each rule below names the test that checks it when the rule is about security. Typed GitHub calls, the final shape of the write check and the App installation-token source are not decided here; "Not decided here" lists where each one is.
 
 ## Context
 
-Shadewright and Sablecourt both call GitHub over HTTP.
+Shadewright and Sablecourt both call GitHub over HTTP with their own code. Shadewright has a hardened adapter, `internal/providers/github`: its transport pins `https://api.github.com`, refuses redirects, bounds bodies, retries with backoff and keeps secrets out of errors, and its kill switch runs before each write attempt. Sablecourt's `git.open_pr` action posts to `/repos/{owner}/{repo}/pulls` through `http.DefaultClient`, so it follows redirects and decodes a successful answer without a size bound. Its API base URL is configurable.
 
-**Shadewright** has a hardened adapter, `internal/providers/github`, of about 4,240 production lines: `provider.go` (1,690), `client.go` (549), `feedback.go` (519), `handoff.go` (341), `validate.go` (111), `ancestry.go` (73), `doc.go` (83), `auth` (779) and `ratelimit` (92), plus `internal/providers/retryafter` (43). It implements `GitProvider` (26 methods), `FeedbackSource` and `AncestryChecker`. Its transport pins `https://api.github.com`, refuses redirects, requires TLS 1.2, bounds every body (2 MiB for JSON by default, 64 KiB in `auth`, streamed feedback pages of up to 30 items of 400 KiB), retries with backoff and jitter (4 attempts and a 500 ms first step by default), waits a requested delay of up to 15 seconds in place and caps any delay at one hour. Its errors carry fixed text, a status and a class, never a URL, header, body or token. Its kill switch (`providers.CheckWrite`) runs immediately before each write attempt, after the token and body are ready. The App key stays in Key Vault behind a `Signer` ([ADR-0006](https://github.com/shadewright-labs/shadewright/blob/main/docs/adr/0006-github-app-key-in-key-vault.md)). Its write authorization is a stale-plan gate in the Kubernetes controller.
+Both products need the same things from a client: one origin, no redirects, bounded reads, retries that do not resend a write by accident, a token that cannot leak through printing or tracing, and errors with no secrets in them. Writing and fixing that twice is the cost this package removes.
 
-**Sablecourt** has a `git.open_pr` action that posts to `/repos/{owner}/{repo}/pulls` with a token from its secret store. The shipped wiring uses `http.DefaultClient`, so it follows redirects and decodes a successful answer without a size bound; the API base URL is configurable. It also has an OAuth device flow (default scope `repo`) with its own client, and a webhook handler. It authorizes writes through out-of-band approval of a pinned plan. It wants to push task branches, read check evidence and merge.
-
-A first version of this record put a shared write authorization model into the package: a closed set of operations, a digest over their canonical encoding, and a gate comparing that digest. Two rounds of design review each returned "rework", and the second found new high-severity cases of the same kind as the first: what an approval covers, how the digest is framed, inputs that change between verification and send, check-then-write races on pull requests, a broad token, stale check evidence. The two products authorize differently, and the shared model did not converge. This version shares only what both products need from a client and leaves authorization to each product.
+Earlier drafts of this record also shared a write authorization model: a closed set of operations, a digest over their encoding and a gate comparing it. The products authorize differently (Shadewright with a stale-plan gate in its controller, Sablecourt with approval of a pinned plan), and three design reviews of those larger drafts each found new high-severity cases of the same kind. The shared model did not converge, so authorization stays in each product.
 
 ## Decision
 
-1. Package `githost` gives a product a safe client for one Git host origin and one repository. It is not an authorization layer. It holds the pinned-origin transport, the `Token` type, the `Credential` and `Signer` interfaces, a GitHub App installation-token source, error kinds, the exported `retryafter` package and a small set of typed GitHub calls.
-2. Each typed call maps to one documented host request, takes every field the host acts on as an explicit argument, and returns what the host returned after validation. It makes no claim about approval. Each call's documentation says which preconditions the host enforces in the same request and which are check-then-write. A racy precondition is never presented as a guarantee.
-3. The one private send path calls a product-supplied pre-send hook immediately before every attempt of every non-GET repository request, with the literal request facts. The hook can refuse. That is all the library promises about authorization.
-4. The immutable repository ID is product configuration. The client checks it on reads and before writes, and documents that for name-addressed writes the check is a race that only a credential restricted to that repository closes.
-5. What an approval binds, evidence freshness, push rules, comment markers, merge receipts and branch proofs belong to the products. Sablecourt writes its own decision record for push, check evidence and merge before that code is built.
-6. Only the transport and credential parts are host-neutral now. Typed Azure DevOps calls need a spike and a later record.
-7. The package uses only the Go standard library.
+The package has five built parts. Each rule is a short sentence a test can check. Test files are under `githost/`.
 
-## Package layout
+### 1. Pinned-origin transport (`internal/transport`)
 
-```text
-githost/                     RepoRef, ObjectID, Token, Credential, Signer, PreSend, Observer, error kinds
-githost/retryafter/          Retry-After and rate-limit reset parsing, exported for other HTTP clients
-githost/github/              typed GitHub calls and the bounded read (Get)
-githost/github/app/          GitHub App installation-token source, restricted to one repository
-githost/githosttest/         recorded-fixture server and contract suite, exported for other modules
-githost/internal/transport/  pinned-origin HTTP client, the one send path, bounds, retry, scrubbing
-githost/internal/secret/     the only way a token's value leaves a Token; used by the transport alone
-```
+The transport is internal: no exported constructor exists yet, and a product will reach it through the typed calls that are still to come.
 
-Production constructors take no URL. Only `githosttest` can point a client at a loopback fixture server.
+- A client is built for one host. `New` refuses a host with a scheme, path, user, query, backslash or space, a missing credential, and a fixed `Authorization` header (`TestNewRefusesConfig`). A port is accepted; nothing restricts it to loopback.
+- `Do` accepts GET, HEAD, POST, PUT and PATCH. It refuses other methods, a path that is relative, starts with `//`, or holds a query, fragment or backslash, a missing operation label, and a path its `Template` does not name. These refusals are `ErrRejected` and happen before a credential is asked for or anything is sent (`transport_test.go`, `TestRequestOffOriginRefused`; `observer_test.go`, `TestTemplateMatchesPath`).
+- The URL is checked against the pinned https origin again before the token is set, and a round tripper below the HTTP client refuses any request off that origin (`TestOnOrigin`, `TestPinnedRoundTripper` in `transport_test.go`).
+- Redirects are not followed. A 3xx other than 304 is an error, and the redirect target gets no request (`transport_test.go`, `TestRedirectNotFollowed`). A 304 comes back as an answer (`TestNotModified`); the transport does not check that the request was conditional.
+- The wire request carries a context that keeps the caller's cancellation and deadline and returns no value for any key. A client trace in the caller's context gets no callback for any request, so trace hooks never see the `Authorization` header (`trace_test.go`, `TestCallerTraceNeverSeesTheWire`, `TestWireContextFollowsTheCaller`). The credential and the write check get the caller's context with its values.
+- A token is asked for before each attempt with `Scope{Repo, Write}`, where `Write` is true for POST, PUT and PATCH (`TestScopeAsked`, `TestCallerTraceNeverSeesTheWire`).
+- Requests with a body carry no `GetBody`, so Go's HTTP transport does not resend a body it has partly written (`TestRequestsCannotBeRewound`). The step from there to "at most one write reaches the host per write check" rests on how Go's transport behaves and has no test of its own.
+- A 2xx body is read up to the request's `Limit` or the client's `BodyLimit` (2 MiB by default). A declared length over the bound is refused before reading, and a longer body is `ErrTooLarge` and is not retried (`TestBodyBounds`, `TestDefaultBodyLimit`). Bodies of other statuses are not read, except up to 16 KiB of a 403 searched for a rate-limit marker and then dropped.
+- One call is bounded by `Timeout` (2 minutes by default) and one attempt, body included, by `AttemptTimeout` (60 seconds; `TestSlowBody`). The default HTTP transport sets TLS 1.2 as the minimum, 10 second dial and handshake timeouts, a 30 second wait for headers and a 256 KiB header limit, and keeps Go's proxy settings from the environment. Tests replace that transport, so none of these settings is tested.
+- Reads (GET, HEAD) and writes marked `Idempotent` are retried on network errors, timeouts, 408, 429, 5xx and rate limits, up to `MaxAttempts` (4), with exponential backoff from `BaseDelay` (500 ms) and jitter (`TestTransientThenSuccess`, `TestNetworkErrorRetried`, `TestJitterApplied`). A write not marked idempotent is sent once (`TestWriteSentOnce`).
+- A rate limit is a 429, or a 403 with `Retry-After`, with `X-RateLimit-Remaining: 0`, or whose first 16 KiB name a rate limit or abuse detection or cannot be read. The delay is the one the headers ask for, else one minute, capped at one hour. A delay up to `MaxWait` (15 seconds) is waited in place; a longer one is returned as `RetryableError` with the delay. No wait starts that would end past the context deadline, and a cancellation ends a wait (`TestRetryAfterAndRateLimits`, `TestRateLimited`, `TestNoWaitPastDeadline`, `TestCancelDuringBackoff`). A plain 403 comes back as an answer (`TestPlain403IsAnswer`).
+- An answer or body that arrives after the call's context ended is dropped and the end of the context is returned (`TestAnswerAfterContextEnd`).
+- Error text is fixed words, the operation label, the status and a valid refusal class. Errors of `net/http` and of the credential are replaced, and the credential's class (canceled, deadline, retryable, not found, forbidden, unauthorized) is kept. A helper in `transport_test.go` walks the whole error chain in the error tests for token, body, path and check canaries, URLs and the server address (`TestUnreachableHostScrubbed`, `TestCredentialErrorsKeepClassOnly`).
+- The `Observer` gets one `Event` per attempt handed to the HTTP client: method, host, `Template`, status, attempt and duration. It is called synchronously after the body is read and closed, outside the attempt timeout, and `Do` starts no attempt past the caller's deadline after it (`observer_test.go`). An attempt stopped before the send (credential failure, write check refusal) gives no event. `Event` has no field of interface, map, slice, pointer, func or channel type (`TestEventFields`).
+- A `Template` is a path with fixed segments of lowercase ASCII letters, digits, `.`, `_` and `-`, `{name}` for one segment and a final `{name...}` for one or more. It holds no value of the request beyond its fixed segments.
+- `NextPage` reads the `rel="next"` link of an answer and returns the original request with its `page` parameter one higher. It reads only the page number from the link and does not follow or keep the link's URL. A link off the origin, a second next link, a missing, repeated or malformed page, a page outside 1 to 1000, or a page that is not the current one plus one is `ErrUntrustedAnswer`; a malformed page on the request itself is `ErrRejected` (`TestNextPage`, `FuzzNextPage`). There is no last-page result and no cursor support.
+- `Config.RoundTripper` replaces the HTTP transport and is a trusted component: it sees the `Authorization` header. It sits in an internal package, so code outside the module cannot set it.
 
-## The kept surface
+### 2. `Token`
 
-```go
-package githost
+- A `Token` prints, formats and marshals as a placeholder with every `fmt` verb tested, through `json`, `xml`, `gob` and `slog`, as a field, pointer, slice or map element (`token_test.go`, `TestTokenNeverPrints`, `TestTokenMarshalersReturnPlaceholder`).
+- No exported function or method returns its value. Package `internal/secret` holds the one function that does, and the transport calls it after the origin check (`TestTokenReveal`).
+- A token has a scheme, `Bearer` or `Basic` (a password with an empty user, for an Azure DevOps personal access token, not tried against the host), and an optional expiry.
 
-// RepoRef is the one repository a client is bound to. Every field comes from the product's trusted
-// configuration. ID is the host's immutable repository ID (GitHub numeric ID); it is never learned.
-type RepoRef struct {
-	Host        Host // GitHub only for now
-	Owner, Name string
-	ID          string
-}
+### 3. `Credential` and `Signer`
 
-type ObjectID string // full lowercase hex object ID; Valid() refuses names and short IDs
+- `Credential.Token(ctx, Scope)` returns a token for one request; `CredentialFunc` adapts a function. Caching and refresh are the credential's business.
+- `Signer` has `Algorithm()` and `Sign(ctx, digest)`, with `SignatureAlgorithm` a named string type and `RS256` defined. No built code calls a `Signer` yet; the App token source will.
 
-// Token prints, formats, logs and marshals as a placeholder. It has no exported accessor and no
-// method that writes it into a header.
-type Token struct{ /* unexported */ }
-func NewToken(s Scheme, value string, expires time.Time) Token
-func (t Token) Expires() time.Time
+### 4. Error kinds
 
-type Scope struct {
-	Repo  RepoRef
-	Write bool
-}
-type Credential interface {
-	Token(ctx context.Context, s Scope) (Token, error)
-}
-type CredentialFunc func(ctx context.Context, s Scope) (Token, error)
+- Sentinels matched with `errors.Is`: `ErrNotFound`, `ErrPathNotInTree` (wraps `ErrNotFound`), `ErrConflict`, `ErrForbidden`, `ErrUnauthorized`, `ErrRejected`, `ErrTooLarge`, `ErrInvalidEntry`, `ErrUntrustedAnswer`, `ErrUnsupported`, `ErrInvalidConfig`, `ErrStoppedBeforeWrite`, `ErrOutcomeUnknown`, `ErrUnusableReceipt` and `ErrRetryable`. Types for `errors.As`: `*Error` (operation, status, kind), `*RetryableError` (with `RetryAfter`) and `*Refusal` (`errors_test.go`).
+- `StatusError` maps 404 and 410 to `ErrNotFound`, 409 to `ErrConflict`, 403 to `ErrForbidden`, 401 to `ErrUnauthorized`, and 400 and 422 to `ErrRejected`. Other statuses, 405 among them, get no kind (`TestStatusError`).
+- Once an attempt of a write may have reached the host (a network error, a timeout, 408, 5xx, or a context that ended before a non-2xx answer was taken), every later failure of the call except an unusable receipt matches `ErrOutcomeUnknown` as well as its own cause: a write check refusal, a credential error, a cancellation, a later status such as 409 or 422, or the last retry. Such an error never matches `ErrRetryable`. A rate-limited attempt did not write and leaves the outcome known (`outcome_test.go`, `TestOutcomeUnknownAcrossAttempts`).
+- A 2xx answer to a write whose body is past the bound or cannot be read is `ErrUnusableReceipt` with the status. It is not sent again, it is not retryable, and it does not match `ErrOutcomeUnknown` (`TestUnusableReceipt`, first attempt). The same holds after an earlier lost attempt of an idempotent write, a case no test covers. The caller reads state to learn what was written.
+- `context.Canceled` and `context.DeadlineExceeded` keep their identity; a deadline is also `RetryableError`.
 
-type SignatureAlgorithm string // named type; Shadewright aliases it
-type Signer interface {
-	Algorithm() SignatureAlgorithm
-	Sign(ctx context.Context, digest []byte) ([]byte, error)
-}
+### 5. `retryafter`
 
-// Send is what a PreSend hook sees before one attempt of a non-GET repository request.
-type Send struct {
-	Repo     RepoRef
-	Call     string // the typed call's fixed name, such as "github.Merge"
-	Method   string
-	Template string // path template, such as "/repos/{owner}/{repo}/pulls/{number}/merge"
-	Args     any    // the typed call's argument struct, a copy of what is sent
-	Attempt  int    // 1 for the first attempt, then each retry
-}
+- `Parse` reads `Retry-After` in seconds or as an HTTP date; `ParseReset` reads a Unix reset time; `Header` uses `Retry-After` when present, else the reset when `X-RateLimit-Remaining` is `0`. Results are capped at the caller's maximum, and a past, negative or unreadable value gives zero (`retryafter_test.go`).
+- A present but unusable `Retry-After` gives zero and the reset is not read; the transport then waits its one-minute default.
+- The package is exported, keeps no state and makes no request, so other HTTP clients can use it.
 
-// PreSend is called immediately before every attempt of every non-GET repository request. A non-nil
-// error stops the call; nothing more is sent. A nil PreSend refuses every such request.
-type PreSend func(ctx context.Context, s Send) error
+## The write check
 
-// Observer gets one payload-free event per attempt: call, method, template, status, attempt, duration.
-type Observer func(Event)
-```
+The transport calls one check, `WriteCheck`, immediately before every attempt of every request whose method is not GET or HEAD, after the token is set and the body is built (`transport_test.go`, `TestWriteCheckBeforeEachAttempt`, `TestReadsNotChecked`). Its name and its argument (`Send{Op, Method, Template, Attempt}`) are provisional and become final with the first typed write call.
 
-```go
-package github
+Fixed now:
 
-type Config struct {
-	Repo        githost.RepoRef
-	Credential  githost.Credential
-	PreSend     githost.PreSend
-	Observer    githost.Observer
-	MaxAttempts int           // 0 means 4
-	BaseDelay   time.Duration // 0 means 500 ms, as in Shadewright today
-	MaxWait     time.Duration // 0 means 15 s
-	Timeout     time.Duration // one call, retries included; 0 means 2 min
-}
-
-func New(cfg Config) (*Client, error)
-
-// Reads.
-func (c *Client) Ref(ctx context.Context, branch string) (githost.ObjectID, error)
-func (c *Client) Commit(ctx context.Context, id githost.ObjectID) (Commit, error)
-func (c *Client) Tree(ctx context.Context, id githost.ObjectID, lim TreeLimit) ([]TreeEntry, error)
-func (c *Client) Blob(ctx context.Context, id githost.ObjectID, limit int64) ([]byte, error)
-func (c *Client) Compare(ctx context.Context, base, head githost.ObjectID) (Comparison, error)
-func (c *Client) PullRequest(ctx context.Context, number int64) (PullRequest, error)
-func (c *Client) ListPullRequests(ctx context.Context, q PullRequestQuery) (PullRequestPage, error)
-func (c *Client) CheckRuns(ctx context.Context, commit githost.ObjectID, q CheckRunQuery) (CheckRunPage, error)
-func (c *Client) Statuses(ctx context.Context, commit githost.ObjectID, page Page) (StatusPage, error)
-func (c *Client) Get(ctx context.Context, r ReadRequest, decode func(Response) error) error
-
-// Writes. Each passes PreSend before every attempt.
-func (c *Client) CreateBlob(ctx context.Context, content []byte) (githost.ObjectID, error)
-func (c *Client) CreateTree(ctx context.Context, a CreateTreeArgs) (githost.ObjectID, error)
-func (c *Client) CreateCommit(ctx context.Context, a CreateCommitArgs) (Commit, error)
-func (c *Client) CreateRef(ctx context.Context, branch string, id githost.ObjectID) error
-func (c *Client) MoveRef(ctx context.Context, branch string, old, new githost.ObjectID) error
-func (c *Client) OpenPullRequest(ctx context.Context, a OpenPullRequestArgs) (PullRequest, error)
-func (c *Client) UpdatePullRequest(ctx context.Context, number int64, a UpdatePullRequestArgs) (PullRequest, error)
-func (c *Client) ClosePullRequest(ctx context.Context, number int64) (PullRequest, error)
-func (c *Client) Merge(ctx context.Context, number int64, a MergeArgs) (MergeResult, error)
-func (c *Client) CreateCheckRun(ctx context.Context, a CreateCheckRunArgs) (int64, error)
-func (c *Client) PostComment(ctx context.Context, number int64, body string) (int64, error)
-```
-
-Result types keep what the host sent that products decide on: `TreeEntry` keeps type and mode; `Comparison` keeps `status`, `ahead_by` and `behind_by`; `PullRequest` keeps `RecordedHead` (the host's `head.sha`, which stays evidence after the branch moves) apart from the live head that `Ref` reads, plus head and base refs, head repository ID, state, merged flag, `merge_commit_sha`, a nullable `mergeable` and a nullable body; a check run keeps its `app.id`, a status its `creator.id`. `MergeArgs.SHA` is required. `UpdatePullRequestArgs` uses pointers, so nil means the field is not sent. `CreateCheckRunArgs` has the head SHA, name, status, conclusion and the whole output (title, summary, text). `CreateCommitArgs` has message, tree, parents and optional author and committer with dates; without them the host picks the identity and the commit ID cannot be predicted. On GitHub a `Page` is a validated page number the caller may set, so a product can walk pages backwards or resume from a stored one; the next request is rebuilt on the pinned origin, never from a `Link` URL.
-
-`Get` is the read-only escape hatch for what stays in a product (comments, reviews, permission reads, rules): GET only, a path of escaped segments under the bound repository, query keys from a fixed allow-list, a body bound of at most 16 MiB, and `Response.NotModified` for a 304 when the request set `IfNoneMatch`. It carries no header from the caller and returns no header but `ETag`, `Date` and the page positions.
-
-### Preconditions per write call
-
-"Host" means the host refuses in the same request when the condition fails. "Racy" means any check the product makes beforehand can be overtaken before the write lands. Every write below except `MoveRef` is addressed by owner and name, so the repository binding is racy too (see "Repository identity").
-
-| Call | Host request | Precondition and who enforces it | Sent again on retry |
-| --- | --- | --- | --- |
-| `CreateBlob`, `CreateTree` | `POST /git/blobs`, `POST /git/trees` | none needed: content-addressed. The blob ID is checked against a locally computed hash | yes |
-| `CreateCommit` | `POST /git/commits` | none. Tree and parents are literal; without author and committer dates a retry can create a second, unreferenced commit | yes; the ID returned is the one from the answer that arrived |
-| `CreateRef` | `POST /git/refs` | ref must not exist: host (422, returned as `ErrConflict`) | no; a lost answer is `ErrOutcomeUnknown` |
-| `MoveRef` | GraphQL `updateRefs` by repository node ID, `beforeOid`, `afterOid`, `force: false` | expected old value: host. Bound to the repository ID through the node ID | yes; a refused retry is explained by one ref read (at `new` is success, elsewhere `ErrConflict`) |
-| `OpenPullRequest` | `POST /pulls` with `maintainer_can_modify` as passed | head commit: racy, the host records whatever the branch points at. A second open pull request with the same head and base: refused by the host (**spike** to confirm the 422). One with the same head to another base: not refused | no |
-| `UpdatePullRequest`, `ClosePullRequest` | `PATCH /pulls/{n}` | none. State and base checks made beforehand are racy; a concurrent retarget is not seen | no |
-| `Merge` | `PUT /pulls/{n}/merge` with `sha` and `merge_method` | head equals `sha`: host (409 is `ErrConflict`). Base, state and check results: racy. An advance of the base ref changes the merge result and is not covered at all. A merge queue requirement refuses (405, `ErrForbidden`) | no |
-| `CreateCheckRun` | `POST /check-runs` | none; the head SHA is literal. A newer run on the same commit can follow at any time | no |
-| `PostComment` | `POST /issues/{n}/comments` | none. Uniqueness of a marker across concurrent calls is racy | no |
-
-The library never sends a force flag, a delete, or a bypass field. A write whose answer is lost and that is not sent again returns `ErrOutcomeUnknown`. When the context ended first, the error matches both `ErrOutcomeUnknown` and the context error, so a caller sees the cancellation and still knows the write may have landed.
-
-## The pre-send hook
-
-The transport has one unexported send path. For every non-GET repository request it builds the request and its body once from a copy of the call's arguments taken at entry (byte slices included), gets the token, checks the URL against the pinned origin, installs the token, calls `PreSend` with that copy, and then calls `http.Client.Do`. Every attempt sends the same body bytes. A caller who changes its own slices after the call starts changes nothing that is sent or shown to the hook.
-
-An attempt is one call to `Do`. `net/http` may resend on a reused connection when nothing of the request was written; that is the same attempt, because no byte reached the host. A refusal comes back as `ErrStoppedBeforeWrite` with the hook's text dropped. A product that needs its own refusal sentinels back lists them in `Config` and gets `ErrStoppedBeforeWrite` wrapping the matching one.
-
-GET requests go through a second function whose type cannot carry another method. The App token exchange (`POST /app/installations/{id}/access_tokens`) is a third, private path to one fixed endpoint: it uses the same origin, redirect, timeout and bound rules, authenticates with the App JWT, changes no repository state and does not call the hook.
-
-Tests prove the hook per mutation: for each write call, for each retry and for the read after a refused `MoveRef` retry, a test refuses at that attempt and asserts that the next request the fixture server sees is not a write. The suite also counts hook calls against write requests the server received.
+- It is called on every attempt, retries included, with the caller's context.
+- A refusal stops the call and nothing more is sent; the error matches `ErrStoppedBeforeWrite`. A nil check refuses every write (`TestNilWriteCheckAllowsNoWrite`).
+- A refusal carries only a class: a `*Refusal` found in the check's error whose `Class` is 1 to 32 lowercase ASCII letters, digits and dashes is copied into a new `Refusal`. The check's text and error are dropped, and an invalid class is dropped too (`outcome_test.go`, `TestRefusalClass`; `errors_test.go`, `TestRefusalValid`).
 
 ## Repository identity
 
-The client reads `GET /repos/{owner}/{name}` before the first write of each call and compares the numeric ID with `RepoRef.ID`; reads that carry a repository ID are compared too, and a mismatch is `ErrUntrustedAnswer`. The same read gives the node ID that `MoveRef` uses, so ref moves are bound to the repository by the host. Every other write is addressed by name: if the repository is renamed, transferred or recreated between the check and the write, the write lands in the replacement.
+`RepoRef` has `Host`, `Owner`, `Project` (Azure DevOps; empty on GitHub), `Name` and `ID`. `ID` is configuration: the product supplies the host's immutable repository ID with the names, and the client does not learn it from the host. The built transport passes `RepoRef` to the credential in `Scope` and does nothing else with it. Comparing `ID` with the host's answers comes with the typed calls.
 
-What closes that window is the credential. An App installation token requested for the pinned repository cannot write elsewhere. A fine-grained token for one repository has the same effect. The library requires nothing about the credential, but the App source it ships always asks for one repository. A broad token, such as the `repo` scope of Sablecourt's device flow, defeats the binding, and the package documentation says so.
+`ObjectID.Valid` accepts 40 or 64 lowercase hexadecimal characters and refuses the all-zero ID of either length, which hosts read as "create" or "delete" a ref (`repo_test.go`).
 
-## Transport rules
+`Host` names GitHub and Azure DevOps. The transport takes the host from its configuration; pinning `api.github.com` in code comes with the GitHub client.
 
-1. One origin, `https://api.github.com`, pinned in code. Paths are built from escaped segments. No user info or non-default port.
-2. Redirects are refused; a 3xx is an error except a 304 answering a conditional `Get`. TLS 1.2 or later, dial, handshake and header timeouts, one attempt bounded at 60 seconds and one call at `Timeout`.
-3. Bounded reads: 2 MiB of JSON unless the call sets another bound, 64 KiB for the token exchange, a declared `Content-Length` over the bound refused before reading. Lists are bounded by pages and items; past either is `ErrTooLarge`, never a short list.
-4. Reads are retried on network errors, timeouts, 408, 429, 5xx and rate limits, with backoff from `BaseDelay` and jitter, up to `MaxAttempts`. Writes are retried only where the table above says so.
-5. Rate limits: `Retry-After` (seconds or an HTTP date), then `X-RateLimit-Remaining: 0` with `X-RateLimit-Reset`, then one minute for a secondary limit or an unreadable 403, a GraphQL `RATE_LIMITED` error in a 200 answer, and a cap of one hour. A delay up to `MaxWait` is waited in place; a longer one is a `RetryableError` carrying it. Nothing waits past the context deadline.
-6. No logging and no secrets in errors. The package imports no logger. Errors are built from fixed text, the call name, the status and a kind. Errors from `net/http`, the credential, the signer, the hook and JSON decoding are never wrapped as values; only their class is kept. A 403 body may be searched with a bound for a rate-limit marker and is then dropped. The `Observer` never receives a body, header, token or error value.
-7. Answers are checked: repository ID, pull request number, head, base and commit are compared with what was asked; a foreign answer is `ErrUntrustedAnswer` and is not retried.
-8. An answer that raced the end of the call's context is dropped (Shadewright issues 767 and 779).
+Writes addressed by owner and name race against a rename, transfer or recreation of the repository between any check and the write. A credential restricted to the one repository closes that window; a broad token does not.
 
-## Error kinds
+## Not decided here
 
-`ErrNotFound`, `ErrPathNotInTree` (wraps `ErrNotFound`), `ErrConflict`, `ErrForbidden`, `ErrUnauthorized`, `ErrRejected`, `ErrTooLarge`, `ErrInvalidEntry`, `ErrUntrustedAnswer`, `ErrUnsupported`, `ErrInvalidConfig`, `ErrStoppedBeforeWrite`, `ErrOutcomeUnknown` (a write was sent and its answer lost; never a pre-send refusal) and `RetryableError` (matches `ErrRetryable`, with `RetryAfter`). `context.Canceled` and `context.DeadlineExceeded` keep their identity. Products map these to their own sentinels.
+- Typed GitHub calls: each is designed with its code in its own small pull request, with its design notes in the issue (armory issues 12 to 18).
+- The GitHub App installation-token source: issue 21.
+- The recorded-fixture server and contract suite: issue 11.
+- Release controls (tag ruleset, attestation, the `githost` import allow-list and the contributor rules): issue 22, before any product pins a version.
+- Azure DevOps calls: a later record after a spike. Input for it from the REST pages: ref updates take `oldObjectId` and `newObjectId` and report `staleOldObjectId`; `POST .../pushes` creates the commit and moves the ref in one request; the pull request update page does not say a completion checks any head.
+- Product authorization. Sablecourt's push, check evidence and merge (its issues 133, 135 and 144) get Sablecourt's own record, accepted before that code. It answers: what an approval names, so an approval for one write cannot authorize another; how approvals are encoded if compared by digest; that the bytes approved are the bytes sent; where approval is required and who may reuse it after a retry or restart; which pull request races it accepts or narrows (head moved before create, retarget before update, close or merge, a second pull request to another base); whether review covers the source commit or the merge result; how the latest check result per producer is chosen and stale evidence refused; how an uncertain write is reconciled before the next one; which credential writes (a repository-restricted token, no ruleset bypass where host checks are relied on); and how a one-commit branch is built and its returned object IDs checked before the ref moves. Shadewright keeps its stale-plan gate, branch proofs, merge receipts and its `GitProvider` fake.
 
-## What moves out
+### Guidance for the per-call work (input, not a decision)
 
-### To Sablecourt
+"Host" means the host refuses in the same request when the condition fails; "check-then-write" means any check the product makes beforehand can be overtaken.
 
-Sablecourt's push, check evidence and merge (its issues 133, 135 and 144) need their own decision record in Sablecourt, accepted before code. That record must answer what the design reviews of this one raised:
-
-- Wrong-write approval: what exactly an approval names (repository ID, refs, pull request, base, expected IDs, the whole payload including check-run output and messages), so that an approval for one write cannot authorize another.
-- Digest framing: if approvals are compared by digest, a versioned, length-delimited encoding with presence tags for optional fields and slices, and tests of pairs that must differ.
-- Frozen inputs: the bytes approved are the bytes sent, read once from the trusted repository and never read again from a caller-owned source.
-- Pull request races: the head can move before create, a retarget can happen before update, close or merge, and a second pull request to another base can appear after a lookup. Which of these Sablecourt accepts, narrows (rulesets, being the only writer) or refuses.
-- Base-ref advance: whether review covers the source commit alone or a particular integration result, given that `sha` pins the head only.
-- Stale check evidence: a newer failure on the same SHA, how the latest result per producer is chosen, which required checks the host itself enforces at merge, and how an uncertain check-run POST is reconciled.
-- Uncertain outcome after cancellation: how a write that may have landed is detected and reconciled before any further write, for merge by number, recorded head and actual base.
-- Credential choice: an App installation token or a fine-grained token restricted to the repository for every write, the opener included; the device-flow `repo` token for reads only.
-- The single-commit push rule: Sablecourt's task end can leave zero, one or two snapshot commits on top of the harness's work, so a one-commit branch has to be built before approval, and signed or multi-commit branches refused or handled another way.
-
-Sablecourt also keeps its OAuth device flow and client, webhook verification and its local Git code.
-
-### To Shadewright (kept there)
-
-- `GitProvider`, `FeedbackSource`, `AncestryChecker` and its fake.
-- The stale-plan gate, kill switch and record hold, called from `PreSend`.
-- Branch rules and proofs: the `shadewright/` prefix, target ancestry before creation, the opposite condition for append, single-parent and allowed-path proofs, tree comparisons with its own byte bound, `ListDir` caching and symlink and submodule filtering.
-- Pull request rules: listing the head across bases before create and refusing an owned head open to another base, ignoring forks on that lookup, the update no-op, closed and merged checks, duplicate detection, fork-as-not-found by number, the finalizer's any-base close, `EnableAutoMerge` answered as unsupported.
-- Merge receipts (ADR-0030) on `RecordedHead`.
-- `ReviewCheckRun` selection (its App and check name, greatest run ID, neutral and skipped as success).
-- Comment markers and feedback paging on `Get`, and the login-addressed permission read.
-- Its own `retryafter` copy for the Prometheus, Foundry, Vertex and Azure Blob clients until they move to `githost/retryafter`.
-
-## Azure DevOps
-
-Only the transport and credential parts are host-neutral now. Typed Azure DevOps calls are a later record, after a spike against a test organisation. Facts from the pages read, as input for it:
-
-- Ref updates take `oldObjectId` and `newObjectId`; the page says to "specify both the old and new commit to avoid race conditions", and `staleOldObjectId` is a refusal status.
-- `POST .../pushes` creates the commit and moves the ref in one request, so commit and tree IDs are known only after the ref moved. `GitChange` has no file mode.
-- The pull request Update page does not say a completion checks any head. Merge head enforcement is unproven.
-- Policy evaluations are pull request scoped and carry no commit; statuses can be posted on an iteration. Evidence at a commit has to be bound to an iteration the product verified.
-- A pull request description is limited to 4000 characters. Whether `lastMergeSourceCommit` can serve as a recorded head is open.
-- Entra tokens are not scoped to one repository, so the name-addressed race applies to every write.
-
-## Stages
-
-**Stage A.** The transport, `Token`, the credential interfaces and `retryafter` are built on a branch; before merge they take this record's names (`PreSend` with `Repo`, `Call` and `Args` replaces the provisional write check, and `RepoRef.ID` becomes configuration). Then the App source, then the typed GitHub calls with the recorded-fixture server and the contract suite, both exported so another module can run them. Sablecourt adopts the opener first: its `git.open_pr` loses the configurable URL, redirect following and unbounded reads. Push and merge follow only after Sablecourt's own record. The release controls of Shadewright's [ADR-0048](https://github.com/shadewright-labs/shadewright/blob/main/docs/adr/0048-redaction-in-a-shared-module.md) (tag ruleset, attestation, checksum verification on bumps, the `githost` import allow-list) are in place before Sablecourt's first pin. None of them is operational for armory today.
-
-**Stage B.** Shadewright moves its transport, App authentication and literal requests onto the package and keeps its adapter logic. An estimate from file sizes on `main`, not a count of a built change: about 1,420 lines go away outright (`client.go` 549, `auth` 779, `ratelimit` 92); about 700 lines of request code in `provider.go`, `handoff.go` and `validate.go` become calls into the package and shrink rather than vanish; about 2,100 stay (the rest of `provider.go`, `feedback.go`, most of `handoff.go`, `ancestry.go`, `doc.go`). Tests that move with the code: `auth/source_test.go` (1,155, its fake signer replaced by a test signer), `ratelimit_test.go` (96) and the transport parts of `provider_test.go` (2,655) and `testdata` (43 fixtures). Only those ported transport tests are claimed to pass unchanged. Known differences to list and test in the stage B pull request:
-
-- `BaseDelay` defaults to 500 ms in both; any other default is a change.
-- The installation token is requested for the repository by ID; Shadewright asks by name today (**spike**). The App source checks that the grant names exactly the pinned repository; checking the granted permissions is new, as Shadewright's `auth` today requests named permissions but does not read them back.
-- Every write call now reads the repository ID first.
-- `CreateCheckRun` is sent once and a lost answer is `ErrOutcomeUnknown`; today it goes through the retrying sender.
-- `CreateRef` returns `ErrConflict` on 422; today's adapter reads the branch after a 422, and that read moves into the adapter.
-- Today's commit request sends `message`, `tree` and `parents` and no author, committer or dates; the adapter keeps passing exactly that.
-- The `User-Agent` and some error text differ; the adapter's tests compare error class and sentinel.
-
-A differential test of old against new compares results and refusal classes, and asserts each difference above explicitly; it does not compare raw request sequences, which differ by design.
-
-### If stage A ships alone
-
-Shadewright keeps its own adapter and transport tests, and nothing in its tree depends on armory. Sablecourt keeps a hardened opener and runs the contract suite against its use of the package before shipping more. What is lost is shared maintenance: a transport fix needs two implementations and is checked against the other client by hand, recorded on both trackers.
+| Planned call | Precondition | Notes from design review |
+| --- | --- | --- |
+| Create blob, create tree | none needed: content-addressed | The upload stores content even if no ref moves. In a tree, `sha: null` deletes an entry. |
+| Create commit | none | Without author and committer dates a retry can create a second, unreferenced commit with another ID. Compare the returned ID before a ref moves. |
+| Create ref | ref absent: host | A 422 also covers invalid requests and is not proof the ref exists. Ancestry and the target tip are check-then-write. |
+| Move ref (GraphQL `updateRefs`) | expected old value and fast-forward: host, with nonzero IDs and `force: false` | The node ID binds the repository. A refused retry can come from protection or permission with the ref still at the old value. The ref can move away and back between reads. |
+| Open pull request | check-then-write | Head and base are branch names whose tips can move. A duplicate refusal concerns the same head and base; a 422 alone does not diagnose it. |
+| Update, close pull request | check-then-write | The PATCH carries no expected head, base, state or version, so concurrent edits can be overwritten. |
+| Merge | head equals `sha`: host | No expected base tip, merge result or evidence. A 405 means the merge cannot go ahead; it does not diagnose a merge queue. A credential with bypass rights changes which protections apply. |
+| Create check run | none | The SHA is literal. It does not show that the SHA is still the head or that the result stays current. |
+| Post comment | check-then-write | Marker uniqueness is racy. The endpoint also accepts issues and closed pull requests. |
 
 ## Consequences
 
-- One hardened transport for both products, and a token type that cannot be read or put into a header outside the transport.
-- No authorization in armory. Each product builds its own on `PreSend`, and each write call says what the host enforces and what it does not.
-- A fix reaches a product only when that product bumps its pin; an urgent fix waits for both bumps.
-- A bug in the transport hits both products' write paths. The contract suite, the per-mutation hook tests, the release controls of ADR-0048 and each product's own tests stand against it.
-- Armory gains a public API it keeps compatible from `v1`; `v0.x` minor releases may break it with a changelog entry. The contributor rules need a `githost` scope in the pull request title check and in `AGENTS.md`.
+- Both products can share one transport and one token type once the typed calls exist. Until then the built code is a library with no exported client.
+- Armory holds no authorization. Each product builds its own on the write check.
+- A fix reaches a product when it bumps its armory version, so an urgent fix waits for both bumps.
+- A bug in the transport affects both products' write paths. The transport tests, the contract suite of issue 11 and each product's own tests stand against it.
+- Armory gains a public API, kept compatible from `v1`. The pull request title check and `AGENTS.md` need a `githost` scope (issue 22).
 
 ## Security consequences
 
-- No long-lived credential in armory. The App key stays behind `Signer`. Armory never reads a file, environment variable or secret store. Tokens are asked for per request; only the transport installs one, on a request to the pinned origin.
-- Workloads never receive a `Credential`, `Token` or `*github.Client`. In Sablecourt the client lives in the gate process; in Shadewright only the executor holds the Git App.
-- Name-addressed writes are racy against a repository replacement unless the credential is restricted to one repository.
-- `sha` on a merge pins the head only. Base, state and check results are racy and are the product's to narrow.
-- One supply chain for both write paths: a compromised release could write in both products, so ADR-0048's controls apply before the first pin.
+The library guarantees, under the tests named above: a token does not appear in printed, marshalled or logged output; caller trace hooks see no request; requests leave only for the pinned origin and redirects are not followed; error text holds no token, body, URL or callback text; the write check runs before each write attempt and a refusal stops the call; a write that may have landed is reported as `ErrOutcomeUnknown` and an accepted write with an unusable answer as `ErrUnusableReceipt`.
+
+The products keep: choosing and restricting the credential, which closes the name-addressed race; keeping `Credential`, `Token` and clients out of workloads; what the write check allows; reconciling uncertain outcomes; and anything a configured `RoundTripper` does, since it sees the token. A delay a credential reports in `RetryableError` is passed on without the one-hour cap. Armory reads no file, environment variable or secret store, except that the default HTTP transport follows Go's proxy settings from the environment.
 
 ## Alternatives considered
 
-- Keep separate clients. No coordination, but Sablecourt's client follows redirects and decodes without a bound today, and every hardening fix would be written twice.
-- A shared write authorization model in the library. Tried in the first version of this record; two design reviews found new high-severity gaps each time, because the products authorize differently. Comes back only if a third product shares one product's model.
-- A third-party client such as `google/go-github` v88. The sampled version accepts a base URL, can return host text in errors and decodes successful JSON without a caller-chosen bound, although it has a redirect-suppressing client and bounded error reads. Restoring the rules for each call used and re-checking each upgrade costs about as much as the calls, and it brings dependencies past ADR-0048's ceiling.
-- Put the package in Shadewright. Go refuses imports of another module's `internal/`, and exporting it would make the operator module a dependency of Sablecourt.
-- Push with the `git` CLI and a token. An explicit lease (`--force-with-lease=<ref>:<expected>`) gives an expected-old condition, but the product must then enforce fast-forward-only pushes, hand the token to a child process and neutralise local Git configuration. Left for Sablecourt's own record.
+- Keep separate clients: no coordination, but each hardening fix is written twice and Sablecourt's opener stays unbounded until it is.
+- A shared write authorization model: tried in earlier drafts; three design reviews did not converge.
+- A third-party client such as `google/go-github`: it accepts a base URL and decodes successful answers without a caller-chosen bound, so each call would need its rules restored and re-checked on every upgrade.
+- The package in Shadewright: Go refuses imports of another module's `internal/`, and exporting it would make the operator module a dependency of Sablecourt.
 
 ## Recorded decisions
 
-1. GitHub Enterprise Server is not supported now. Neither product needs it, and a runtime host would widen the credential boundary.
-2. Signed commits are out: `CreateCommit` takes no signature, and a recreated commit without its signature has another ID.
-3. Comments stay host-specific. Shadewright's marker depends on GitHub bot and App identity and deletion-safe paging.
-4. Webhook verification stays in the receiving products, with secret lookup, body limits and dispatch.
-5. Shadewright keeps its `GitProvider` fake; it models decisions a protocol fake cannot.
-6. One armory module and one tag series, with a `githost` import allow-list separate from the redaction packages' and consumer tests in each product.
+1. GitHub Enterprise Server is not supported now. Neither product needs it, and a configurable host would widen the credential boundary.
+2. Signed commits are out of scope for now: a commit recreated on the host without its signature has another ID.
+3. Comments stay host-specific. Shadewright's marker depends on GitHub App identity and paging.
+4. Webhook verification stays in the receiving products.
+5. Shadewright keeps its `GitProvider` fake.
+6. One armory module and one tag series, with a `githost` import allow-list separate from the redaction packages'.
 7. This is ADR-0001. A later decision about record keeping does not renumber it.
 
-## Open questions
+## Stages
 
-1. Can GraphQL `updateRefs` create a ref by node ID, which would bind branch creation to the repository ID? (**spike**, stage A)
-2. Does the installation-token request accept `repository_ids`, and does the answer list granted permissions to check? (**spike**, stage A; the token page was not read)
+**Stage A.** The five parts above are built on `feat/githost-core`. Then the per-call work: each typed call in its own pull request with its design notes in the issue, the App source (issue 21) and the fixture server and contract suite (issue 11). Sablecourt adopts the transport first for its opener, through the open-pull-request call, which drops the configurable URL, redirect following and unbounded reads. Release controls (issue 22) are in place before Sablecourt's first pin (issue 19).
 
-## Tasks
+**Stage B.** Shadewright moves its transport and App authentication onto the package once the calls it needs exist, and keeps its adapter logic, gate and proofs. The pull request for that move lists and tests each behaviour difference.
 
-The issues are in shadewright-labs/armory under epic 7.
+## Issue dispositions
 
-| Issue | Disposition | Title and body |
-| --- | --- | --- |
-| 7 | retitle | `Epic: githost, a safe client for one Git host origin`. Tracks ADR-0001: the pinned-origin transport, `Token`, credentials, the App source, `retryafter` and typed GitHub calls, with a pre-send hook as the only authorization point. Approval models stay in the products; Sablecourt's push, evidence and merge need its own record. |
-| 8 | retitle | `feat(githost): core types, error kinds, Token and credentials`. `RepoRef` with a configured ID, `ObjectID`, the error kinds, `Token` with no exported accessor and placeholder printing, `Credential`, `CredentialFunc`, `SignatureAlgorithm`, `Signer`, `PreSend` and `Send`, with table tests and a canary print test. |
-| 9 | close | Out of scope: there is no host-neutral `Reader` or `Writer` and no in-memory fake. Products that need a fake define their own interface; the fixture server is the shared test double. |
-| 10 | retitle | `feat(githost): pinned-origin transport and the pre-send hook`. One origin, redirects refused, conditional 304, bounded reads, retry with backoff, `Retry-After` and rate limits, cursors rebuilt on the origin, the whole error chain scrubbed, an `Observer` with no secrets, one send path calling `PreSend` before each attempt with a frozen copy of the arguments, and the definition of an attempt. |
-| 11 | keep | `test(githost): recorded-fixture server and contract suite`. Both in the exported `githosttest`. The server injects 3xx, 304, oversize and slow bodies, rate limits, 5xx, lost answers and foreign answers. The suite covers every typed call, the per-mutation hook tests, the cross-origin token test and the canary on hook and signer error text. |
-| 12 | retitle | `feat(githost/github): ref, commit, tree, blob and compare reads`. Literal reads with the repository ID check, tree type and mode kept, duplicate and truncation refusal, blob hash check, `Comparison` with status and counts. |
-| 13 | keep | `feat(githost/github): pull request reads`. `PullRequest` with `RecordedHead` apart from the live head, head repository, nullable body and mergeable; paged lists by head and optional base with numeric pages; foreign answers refused. |
-| 14 | retitle | `feat(githost/github): CreateRef and MoveRef`. `POST /git/refs` sent once with 422 as `ErrConflict`; `updateRefs` by node ID with `beforeOid` and no force, retried with the explained refusal; the node-ID create spike. |
-| 15 | retitle | `feat(githost/github): create blobs, trees and commits`. Literal calls with message, tree, parents and optional author and committer; the blob ID checked locally; no signature field. |
-| 16 | retitle | `feat(githost/github): open, update and close pull requests, and post a comment`. Literal calls sent once, nil fields not sent, each documented as check-then-write with no host precondition; the duplicate-pull-request spike. |
-| 17 | retitle | `feat(githost/github): check runs and statuses of a commit, and create a check run`. Reads with name, App and filter arguments, origin on every entry, complete paging; create with the whole output, sent once. |
-| 18 | retitle | `feat(githost/github): merge with an expected head sha`. `PUT .../merge` with a required `sha`, 409 as `ErrConflict`, 405 and merge queue as `ErrForbidden`, a lost answer `ErrOutcomeUnknown` without retry; base and evidence documented as racy. |
-| 19 | keep | `chore: first tagged release that includes githost`. Blocked by 22; Sablecourt's first pin, for the opener. |
-| 21 | keep | `feat(githost/github/app): App installation token restricted to the pinned repository`. A private fixed-endpoint exchange with the transport's origin, redirect and bound rules and no hook; offline config validation, the grant check, single-flight refresh, refresh margin. |
-| 22 | keep | `chore: release controls and contributor rules for githost`. The `githost` scope in the title check and `AGENTS.md`, the import allow-list, the tag ruleset and attestation, before any product pins a version. |
+Armory issues, epic 7:
+
+- 8 (core types, error kinds, `Token` and credentials) and 10 (pinned-origin transport and the write check): covered by this record.
+- 11 to 19, 21 and 22: each carries its own design notes; this record decides none of them.
 
 ## Sources
 
 Read on 2026-11-26.
 
-GitHub REST API (version 2022-11-28): [Pulls](https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28) (merge with `sha` and `merge_method`, 405, 409; create with `draft`; `mergeable` may be `null`), [Check runs](https://docs.github.com/en/rest/checks/runs?apiVersion=2022-11-28), [Commit statuses](https://docs.github.com/en/rest/commits/statuses?apiVersion=2022-11-28), [Git commits](https://docs.github.com/en/rest/git/commits?apiVersion=2022-11-28). Not read: the installation token page and the GraphQL reference.
-
-Azure DevOps REST API 7.1: [Pushes - Create](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pushes/create?view=azure-devops-rest-7.1), [Refs - Update Refs](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/refs/update-refs?view=azure-devops-rest-7.1), [Pull Requests - Update](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/update?view=azure-devops-rest-7.1), [Evaluations - List](https://learn.microsoft.com/en-us/rest/api/azure/devops/policy/evaluations/list?view=azure-devops-rest-7.1), [Pull Request Statuses - Create](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-statuses/create?view=azure-devops-rest-7.1).
-
-Shadewright, on `main`: `internal/providers/git.go`, `checkpoint.go`, `signer.go`, `retryafter/`, `github/` (all files), ADR-0006, ADR-0030, ADR-0032, ADR-0048. Sablecourt, on `main`: `internal/gate/mcp/`, `internal/runtime/coding/worktree.go`, `internal/providers/github_oauth.go`, `cmd/sablecourtd/main.go`.
+- Armory, branch `feat/githost-core`: `githost/` (all files, tests included).
+- GitHub REST API (version 2022-11-28): [Pulls](https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28), [Check runs](https://docs.github.com/en/rest/checks/runs?apiVersion=2022-11-28), [Commit statuses](https://docs.github.com/en/rest/commits/statuses?apiVersion=2022-11-28), [Git commits](https://docs.github.com/en/rest/git/commits?apiVersion=2022-11-28).
+- Azure DevOps REST API 7.1: [Pushes - Create](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pushes/create?view=azure-devops-rest-7.1), [Refs - Update Refs](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/refs/update-refs?view=azure-devops-rest-7.1), [Pull Requests - Update](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/update?view=azure-devops-rest-7.1).
+- Shadewright, on `main`: `internal/providers/github/`, [ADR-0048](https://github.com/shadewright-labs/shadewright/blob/main/docs/adr/0048-redaction-in-a-shared-module.md). Sablecourt, on `main`: `internal/gate/mcp/`, `cmd/sablecourtd/main.go`.
