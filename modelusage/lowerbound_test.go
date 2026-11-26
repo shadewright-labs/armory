@@ -10,13 +10,17 @@ import (
 	"testing"
 )
 
-// The tests in this file check one rule of ParseStream: once a stream has yielded a usage block, nothing that
-// follows can make the result less than that usage. They cut a clean stream after each of its events, read the
-// usage U of that prefix with ParseStream, append bytes (a table of problems, or fuzzed ones) and check that
+// The tests in this file check the rule ParseStream gives a caller about a partial result. They cut a clean
+// stream after each of its events, read the usage U of that prefix with ParseStream, append bytes (a table of
+// problems, or fuzzed ones) and check that
 //
-//   - every count of the result is at least the same count of U (the counts of every family only grow: the
-//     Anthropic and chat completions counts are cumulative, and the Responses usage comes once, in the final
-//     event, so U is zero before it);
+//   - unless the error matches ErrInconsistent, every count of the result is at least the same count of U:
+//     an Anthropic count only takes a later value that is not lower (a lower one is the contradiction), a
+//     chat completions block is replaced only by an equal one, and the Responses usage comes once, in the
+//     final event, so U is zero before it. TotalInputTokens and TotalTokens, sums of counts, follow;
+//     UncachedInputTokens, a difference, does not, and is not checked;
+//   - with ErrInconsistent, the error is a *PartialError, since a contradiction can only come before the final
+//     event;
 //   - when the prefix holds the final event, the result is exactly U, with a nil error or a *TrailingError;
 //   - when U holds any usage, an error is a *PartialError or a *TrailingError, so the usage comes with it;
 //   - the error is nil only for a clean complete stream: never after a reader error, and never without the
@@ -32,7 +36,6 @@ var cleanStreams = []struct {
 	{"anthropic-stream-delta-input.sse", Anthropic},
 	{"anthropic-stream-zero.sse", Anthropic},
 	{"chat-stream.sse", OpenAIChat},
-	{"chat-stream-twice.sse", OpenAIChat},
 	{"chat-stream-zero.sse", OpenAIChat},
 	{"responses-stream.sse", OpenAIResponses},
 	{"responses-stream-cache.sse", OpenAIResponses},
@@ -113,12 +116,7 @@ func checkLowerBound(t *testing.T, pc prefixCase, suffix []byte, readErr error) 
 		te *TrailingError
 	)
 	isPartial, isTrailing := errors.As(err, &pe), errors.As(err, &te)
-	got, low := u.countList(), pc.usage.countList()
-	for i := range low {
-		if got[i] < low[i] {
-			t.Fatalf("usage %+v (err %v) is less than the usage %+v of the prefix", u, err, pc.usage)
-		}
-	}
+	checkNotLower(t, pc, u, err, isPartial)
 	if u != (Usage{}) && u.Family != pc.family {
 		t.Fatalf("family %v, want %v", u.Family, pc.family)
 	}
@@ -160,6 +158,24 @@ func checkLowerBound(t *testing.T, pc prefixCase, suffix []byte, readErr error) 
 		}
 	}
 	return err
+}
+
+// checkNotLower checks that no count of u is below the prefix's, unless err reports a contradiction, which
+// must then come in a *PartialError.
+func checkNotLower(t *testing.T, pc prefixCase, u Usage, err error, isPartial bool) {
+	t.Helper()
+	if errors.Is(err, ErrInconsistent) {
+		if !isPartial {
+			t.Fatalf("err = %v: a contradiction must come in a *PartialError", err)
+		}
+		return
+	}
+	got, low := u.countList(), pc.usage.countList()
+	for i := range low {
+		if got[i] < low[i] {
+			t.Fatalf("usage %+v (err %v) is less than the usage %+v of the prefix", u, err, pc.usage)
+		}
+	}
 }
 
 // problems are suffixes that each break a stream, per family where the bytes differ.
@@ -220,7 +236,8 @@ func TestUsageIsALowerBound(t *testing.T) {
 					}
 					if readErr != nil && !errors.Is(err, cut) && !errors.Is(err, ErrMalformed) &&
 						!errors.Is(err, ErrLineTooLong) && !errors.Is(err, ErrTooLarge) &&
-						!errors.Is(err, ErrOutOfRange) && !errors.Is(err, ErrTruncated) && !errors.Is(err, ErrNoUsage) {
+						!errors.Is(err, ErrOutOfRange) && !errors.Is(err, ErrTruncated) && !errors.Is(err, ErrNoUsage) &&
+						!errors.Is(err, ErrInconsistent) {
 						t.Fatalf("err = %v names no cause", err)
 					}
 				})

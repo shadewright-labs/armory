@@ -130,7 +130,8 @@ func (u Usage) CacheWriteTokens() int64 {
 	return u.CacheWritePromptTokens
 }
 
-// UncachedInputTokens is the part of the prompt neither read from nor written to a cache.
+// UncachedInputTokens is the part of the prompt neither read from nor written to a cache. On a Usage returned
+// with a *PartialError it is not a lower bound (see PartialError).
 func (u Usage) UncachedInputTokens() int64 {
 	return u.TotalInputTokens() - u.CacheReadTokens() - u.CacheWriteTokens()
 }
@@ -172,47 +173,91 @@ var (
 	// ErrTruncated is returned for a stream that ended, failed or carried an error event before its final
 	// event. When the stream yielded usage first, it comes inside a *PartialError.
 	ErrTruncated = errors.New("modelusage: the stream ended before its final event")
+	// ErrInconsistent is returned inside a *PartialError for a stream that contradicts itself before its
+	// final event: an Anthropic count lower than the value an earlier block reported, or a chat completions
+	// usage block that differs from an earlier one. The Usage then holds the latest values.
+	ErrInconsistent = errors.New("modelusage: the stream reported usage that contradicts its earlier usage")
 )
 
-// PartialError is returned by ParseStream when a stream yielded at least one usage block and then stopped or
-// broke before its final event: it ended or was cut, carried an error event, a later event was malformed or
-// held a refused count, or it passed a byte limit. Err is the cause, so errors.Is still matches ErrTruncated,
-// ErrMalformed, ErrOutOfRange, ErrNoUsage, ErrTooLarge, ErrLineTooLong or the reader's error.
+// PartialError is returned by ParseStream when a stream yielded at least one usage block with a count and then
+// stopped or broke before its final event: it ended, an event was cut by the end, the reader failed, it carried
+// an error event, a later event was malformed, contradicted the usage so far or held a refused count, or it
+// passed a byte limit. Err is the cause, so errors.Is still matches ErrTruncated, ErrMalformed, ErrInconsistent,
+// ErrOutOfRange, ErrNoUsage, ErrTooLarge, ErrLineTooLong or the reader's error. ParseStream returns it
+// unwrapped, and its cause never holds a *PartialError or a *TrailingError.
 //
-// The Usage returned with it is never zero and is a lower bound of what the provider reported: every count
-// is the largest value the stream carried before the problem, and nothing after the last usage block can
-// lower it. It is not final, and can be lower than what the provider bills. Each count and total is within
-// Limits.MaxTokens, but a breakdown may be larger than its parent, since the counts may be from between two
-// updates.
+// The Usage returned with it is the usage so far under the rules of the family (see ParseStream). It is not
+// final and can be lower than what the provider bills. What a caller may rely on:
+//
+//   - Unless errors.Is(err, ErrInconsistent), every count is at least the same count that ParseStream returns
+//     for any shorter part of the same stream cut after an event, with the same or larger limits. The sums
+//     TotalInputTokens and TotalTokens are therefore lower bounds of the usage the stream reported.
+//   - UncachedInputTokens is a difference, not a sum, and is not a lower bound: a later report can raise the
+//     cached or cache write count of an unchanged prompt and so lower it. Price a partial result by its
+//     sums, not by its uncached part.
+//   - With ErrInconsistent the counts are the latest the stream sent, and at least one is lower than an
+//     earlier report. They bound nothing; the stream disagrees with itself.
+//
+// Each count and total is within Limits.MaxTokens, but a breakdown may be larger than its parent, since the
+// counts may be from between two updates.
 type PartialError struct {
-	// Err is the cause. It is never nil.
+	// Err is the cause. ParseStream never leaves it nil.
 	Err error
 }
 
-func (e *PartialError) Error() string { return "modelusage: partial usage: " + e.Err.Error() }
+func (e *PartialError) Error() string {
+	return "modelusage: partial usage: " + causeText(e.Err, maxCauseText)
+}
 
 // Unwrap returns the cause.
 func (e *PartialError) Unwrap() error { return e.Err }
 
 // TrailingError is returned by ParseStream when a stream sent its final event and then something that is not
-// allowed after it: an event that would change the counts or end the reply again, a malformed event, an
-// event cut by the end of the stream, a byte limit passed, or a reader error. Err is the cause, as in
-// PartialError.
+// allowed after it: an event that would change the counts or end the reply again, a malformed event, an event
+// the input ended inside, a byte limit passed, a reader error or an error event. Err is the cause, as in
+// PartialError, and ParseStream returns it unwrapped.
 //
 // The Usage returned with it is the final usage, the same as with a nil error, since the counts were complete
 // at the final event. The error tells the caller that the bytes after it were wrong, for logging; it is not a
 // reason to doubt the counts.
 type TrailingError struct {
-	// Err is the cause. It is never nil.
+	// Err is the cause. ParseStream never leaves it nil.
 	Err error
 }
 
 func (e *TrailingError) Error() string {
-	return "modelusage: the usage is final, but the stream is wrong after its final event: " + e.Err.Error()
+	return "modelusage: the usage is final, but the stream is wrong after its final event: " +
+		causeText(e.Err, maxCauseText)
 }
 
 // Unwrap returns the cause.
 func (e *TrailingError) Unwrap() error { return e.Err }
+
+// maxCauseText is how many bytes of a cause's text the message of a PartialError or TrailingError carries.
+const maxCauseText = 160
+
+// causeText returns the text of err for an error message: at most limit bytes, with every byte that is not
+// printable ASCII replaced by a question mark, so that a cause cannot carry control bytes or long text into a
+// log line.
+func causeText(err error, limit int) string {
+	if err == nil {
+		return "no cause recorded"
+	}
+	text := err.Error()
+	b := make([]byte, 0, min(len(text), limit)+3)
+	for i := range len(text) {
+		if i == limit {
+			b = append(b, "..."...)
+			break
+		}
+		c := text[i]
+		if c < ' ' || c > '~' {
+			c = '?'
+		}
+		b = append(b, c)
+	}
+	return string(b)
+}
 
 // LimitError is returned when a reply or a stream line passes its byte limit. It matches ErrTooLarge or
 // ErrLineTooLong with errors.Is.
@@ -509,22 +554,4 @@ func (u Usage) checkParts() error {
 		return ErrOutOfRange
 	}
 	return nil
-}
-
-// maxOf returns, count by count, the larger of a and b, with the family of b.
-func maxOf(a, b Usage) Usage {
-	return Usage{
-		Family:                     b.Family,
-		InputTokens:                max(a.InputTokens, b.InputTokens),
-		OutputTokens:               max(a.OutputTokens, b.OutputTokens),
-		CacheCreationInputTokens:   max(a.CacheCreationInputTokens, b.CacheCreationInputTokens),
-		CacheCreation5mInputTokens: max(a.CacheCreation5mInputTokens, b.CacheCreation5mInputTokens),
-		CacheCreation1hInputTokens: max(a.CacheCreation1hInputTokens, b.CacheCreation1hInputTokens),
-		CacheReadInputTokens:       max(a.CacheReadInputTokens, b.CacheReadInputTokens),
-		CachedPromptTokens:         max(a.CachedPromptTokens, b.CachedPromptTokens),
-		CacheWritePromptTokens:     max(a.CacheWritePromptTokens, b.CacheWritePromptTokens),
-		CacheWrite30mPromptTokens:  max(a.CacheWrite30mPromptTokens, b.CacheWrite30mPromptTokens),
-		CacheWrite12hPromptTokens:  max(a.CacheWrite12hPromptTokens, b.CacheWrite12hPromptTokens),
-		ReasoningTokens:            max(a.ReasoningTokens, b.ReasoningTokens),
-	}
 }

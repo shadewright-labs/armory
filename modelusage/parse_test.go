@@ -100,9 +100,10 @@ func TestParseStreamFixtures(t *testing.T) {
 			want: Usage{Family: Anthropic, InputTokens: 25, OutputTokens: 1}},
 		{file: "chat-stream.sse", family: OpenAIChat, want: Usage{Family: OpenAIChat, InputTokens: 1200,
 			OutputTokens: 42, CachedPromptTokens: 1024}},
-		// Usage on every chunk: each count is the largest reported, the last chunk's in a correct stream.
-		{file: "chat-stream-twice.sse", family: OpenAIChat, want: Usage{Family: OpenAIChat, InputTokens: 300,
-			OutputTokens: 7}},
+		// Usage on every chunk, growing: the second block differs from the first, a contradiction of the one
+		// usage chunk contract. The parse stops there with the latest block.
+		{file: "chat-stream-twice.sse", family: OpenAIChat, wantErr: ErrInconsistent, want: Usage{Family: OpenAIChat,
+			InputTokens: 300, OutputTokens: 2}},
 		{file: "chat-stream-zero.sse", family: OpenAIChat, want: Usage{Family: OpenAIChat}},
 		{file: "chat-stream-no-usage.sse", family: OpenAIChat, wantErr: ErrNoUsage},
 		{file: "chat-stream-truncated.sse", family: OpenAIChat, wantErr: ErrTruncated},
@@ -288,7 +289,19 @@ func TestParseJSONInline(t *testing.T) {
 	}
 }
 
-func TestParseStreamInline(t *testing.T) {
+// streamCase is one inline stream with the result ParseStream must give.
+type streamCase struct {
+	name     string
+	family   Family
+	body     string
+	lim      Limits
+	want     Usage
+	wantErr  error
+	trailing bool // the error is a *TrailingError; otherwise, with a usage, a *PartialError
+}
+
+// streamInlineCases are the inline streams, shared with the chunking property.
+func streamInlineCases() []streamCase {
 	const (
 		start = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n"
 		delta = "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n"
@@ -298,15 +311,7 @@ func TestParseStreamInline(t *testing.T) {
 	long := "data: {\"type\":\"ping\",\"pad\":\"" + strings.Repeat("x", 100) + "\"}"
 	start1 := Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 1}
 	chat1 := Usage{Family: OpenAIChat, InputTokens: 1, OutputTokens: 1}
-	tests := []struct {
-		name     string
-		family   Family
-		body     string
-		lim      Limits
-		want     Usage
-		wantErr  error
-		trailing bool // the error is a *TrailingError; otherwise, with a usage, a *PartialError
-	}{
+	return []streamCase{
 		{name: "ok", family: Anthropic, body: start + delta + stop, want: ok},
 		{name: "crlf and comments", family: Anthropic, body: strings.ReplaceAll(": keep-alive\n\n"+start+delta+stop,
 			"\n", "\r\n"), want: ok},
@@ -329,8 +334,11 @@ func TestParseStreamInline(t *testing.T) {
 			body: "data: {\"type\":\"message_start\",\n" +
 				"data: \"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n" + delta + stop,
 			want: ok},
+		// An event counts only once its blank line is read: without it, message_stop is not the final event.
 		{name: "last event without blank line", family: Anthropic, body: start + delta +
-			"data: {\"type\":\"message_stop\"}", want: ok},
+			"data: {\"type\":\"message_stop\"}", wantErr: ErrTruncated, want: ok},
+		{name: "last event ending in one line end", family: Anthropic, body: start + delta +
+			"data: {\"type\":\"message_stop\"}\n", wantErr: ErrTruncated, want: ok},
 		{name: "event cut at the end", family: Anthropic, body: start + delta + "data: {\"type\":\"message_st",
 			wantErr: ErrTruncated, want: ok},
 		{name: "empty stream", family: Anthropic, body: "", wantErr: ErrTruncated},
@@ -347,7 +355,12 @@ func TestParseStreamInline(t *testing.T) {
 		{name: "ping after the final event", family: Anthropic,
 			body: start + delta + stop + "data: {\"type\":\"ping\"}\n\n", want: ok},
 		{name: "unknown event after the final event", family: Anthropic,
-			body: start + delta + stop + "event: x\ndata: {\"type\":\"x\"}", want: ok},
+			body: start + delta + stop + "event: x\ndata: {\"type\":\"x\"}\n\n", want: ok},
+		{name: "unfinished event after the final event", family: Anthropic,
+			body: start + delta + stop + "event: x\ndata: {\"type\":\"x\"}", wantErr: ErrTruncated, want: ok, trailing: true},
+		{name: "known event after the final event", family: Anthropic,
+			body:    start + delta + stop + "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+			wantErr: ErrMalformed, want: ok, trailing: true},
 		{name: "malformed event after the final event", family: Anthropic, body: start + delta + stop + "data: {\n\n",
 			wantErr: ErrMalformed, want: ok, trailing: true},
 		{name: "responses done after the final event", family: OpenAIResponses,
@@ -416,9 +429,13 @@ func TestParseStreamInline(t *testing.T) {
 			lim: Limits{MaxBytes: 4096, MaxLineBytes: len(long), MaxTokens: 100}, wantErr: ErrLineTooLong, want: start1},
 		{name: "oversized line without newline", family: Anthropic, body: start + long + strings.Repeat("x", 1000),
 			lim: Limits{MaxBytes: 4096, MaxLineBytes: len(long), MaxTokens: 100}, wantErr: ErrLineTooLong, want: start1},
+		// Every event ends within the limit, so the final usage stands; the byte past it is a trailing problem.
 		{name: "stream over the byte limit", family: Anthropic, body: start + delta + stop + "\n",
 			lim:     Limits{MaxBytes: int64(len(start + delta + stop)), MaxLineBytes: 1024, MaxTokens: 100},
-			wantErr: ErrTooLarge},
+			wantErr: ErrTooLarge, want: ok, trailing: true},
+		{name: "final event cut by the byte limit", family: Anthropic, body: start + delta + stop,
+			lim:     Limits{MaxBytes: int64(len(start+delta+stop)) - 1, MaxLineBytes: 1024, MaxTokens: 100},
+			wantErr: ErrTooLarge, want: ok},
 		{name: "stream at the byte limit", family: Anthropic, body: start + delta + stop,
 			lim: Limits{MaxBytes: int64(len(start + delta + stop)), MaxLineBytes: 1024, MaxTokens: 100}, want: ok},
 		{name: "count above max", family: Anthropic, body: start + delta + stop,
@@ -449,6 +466,10 @@ func TestParseStreamInline(t *testing.T) {
 		{name: "zero line limit", family: Anthropic, body: start, lim: Limits{MaxBytes: 10, MaxTokens: 10},
 			wantErr: ErrInvalidLimits},
 	}
+}
+
+func TestParseStreamInline(t *testing.T) {
+	tests := streamInlineCases()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			lim := tt.lim
@@ -539,7 +560,9 @@ func TestStreamReaderError(t *testing.T) {
 			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 1}, truncated: true, partial: true},
 		{name: "chat cut before done", family: OpenAIChat, body: chat, readErr: cut,
 			want: Usage{Family: OpenAIChat, InputTokens: 7, OutputTokens: 2}, truncated: true, partial: true},
-		{name: "cut before any usage", family: Anthropic, body: "data: {\"type\":\"ping\"}\n\n", readErr: cut},
+		// A reader that fails before the final event truncates the stream, with or without usage.
+		{name: "cut before any usage", family: Anthropic, body: "data: {\"type\":\"ping\"}\n\n", readErr: cut,
+			truncated: true},
 		{name: "end before any usage", family: Anthropic, body: "data: {\"type\":\"ping\"}\n\n", readErr: io.EOF,
 			truncated: true},
 		{name: "end after usage", family: Anthropic, body: start, readErr: io.EOF,
