@@ -51,18 +51,29 @@ func checkResult(t *testing.T, cr *countingReader, u Usage, err error, fam Famil
 	if cr.n > fuzzLimits.MaxBytes+1 {
 		t.Fatalf("read %d bytes past the limit of %d", cr.n, fuzzLimits.MaxBytes)
 	}
-	if err != nil && !errors.Is(err, ErrTruncated) && u != (Usage{}) {
+	var (
+		pe *PartialError
+		te *TrailingError
+	)
+	partial := errors.As(err, &pe)
+	carries := partial || errors.As(err, &te)
+	if err != nil && !carries && u != (Usage{}) {
 		t.Fatalf("usage %+v returned with %v", u, err)
 	}
-	var te *TruncatedError
-	if errors.As(err, &te) && te.Partial != (u != Usage{}) {
-		t.Fatalf("usage %+v returned with Partial %v", u, te.Partial)
+	if carries && u == (Usage{}) {
+		t.Fatalf("no usage returned with %v", err)
 	}
 	if u == (Usage{}) {
 		return
 	}
 	if u.Family != fam {
 		t.Fatalf("family %v, want %v", u.Family, fam)
+	}
+	if partial {
+		if rerr := u.checkRange(fuzzLimits.MaxTokens); rerr != nil {
+			t.Fatalf("partial usage %+v is out of range: %v", u, rerr)
+		}
+		return
 	}
 	if verr := u.validate(fuzzLimits.MaxTokens); verr != nil || u.UncachedInputTokens() < 0 {
 		t.Fatalf("usage %+v breaks its rules: %v", u, verr)

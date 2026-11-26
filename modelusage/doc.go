@@ -15,10 +15,32 @@
 // inconsistent with the other counts (more cached tokens than input tokens, for example) is
 // [ErrOutOfRange], never a number. Error text is fixed and never quotes the reply.
 //
-// A Usage is final only when the error is nil. ParseJSON returns a zero Usage with every error. ParseStream
-// returns a non-zero Usage with an error in one case only: a [*TruncatedError] whose Partial field is set,
-// for a stream that stopped before its final event. Those counts are what the stream carried so far and can
-// be lower than what the provider bills; never treat them as the final usage.
+// Which errors come with a usable Usage:
+//
+//   - nil: the Usage is final.
+//   - [*TrailingError] (ParseStream only): the stream sent its final event and then something not allowed
+//     after it. The Usage is final, the same as with a nil error; the error is for logging.
+//   - [*PartialError] (ParseStream only): the stream yielded at least one usage block, then stopped or broke
+//     before its final event. The Usage is never zero and is a lower bound: every count is at least what the
+//     stream reported before the problem, and nothing after a usage block can lower it. It can be lower than
+//     what the provider bills; never treat it as final.
+//
+// Every other error comes with a zero Usage: ParseJSON returns a zero Usage with every error, and ParseStream
+// does when no usage block was read. Both wrapper types unwrap to the cause, so errors.Is still matches
+// [ErrTruncated], [ErrMalformed], [ErrOutOfRange], [ErrNoUsage], [ErrTooLarge], [ErrLineTooLong] or the
+// reader's error. A caller can therefore write:
+//
+//	u, err := modelusage.ParseStream(f, body, lim)
+//	var partial *modelusage.PartialError
+//	var trailing *modelusage.TrailingError
+//	switch {
+//	case err == nil, errors.As(err, &trailing):
+//		// u is final
+//	case errors.As(err, &partial):
+//		// u is a lower bound
+//	default:
+//		// no usage was read
+//	}
 //
 // The package does not make HTTP requests, price tokens, know model names or log anything. Choosing the
 // family from a request path or a provider setting, and what to charge when the usage cannot be read, stay

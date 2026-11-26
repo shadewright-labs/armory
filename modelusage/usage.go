@@ -70,8 +70,9 @@ func (f Family) String() string {
 // count is absent and zero; the count is never made up from them. A caller pricing by lifetime should cap
 // the lifetimes at the cache writes, or price the writes as a whole.
 //
-// A parser never returns a Usage that breaks these rules, and every count and total is within the caller's
-// [Limits.MaxTokens].
+// A Usage returned with a nil error or a [*TrailingError] keeps these rules, and every count and total is
+// within the caller's [Limits.MaxTokens]. One returned with a [*PartialError] keeps the limit but not the
+// part rules, since it may hold counts from between two updates.
 type Usage struct {
 	// Family is the reply format the counts were read from.
 	Family Family
@@ -168,41 +169,50 @@ var (
 	// ErrOutOfRange is returned for a count that is negative, above Limits.MaxTokens, or larger than the
 	// count it is a part of. A count that is not an integer is ErrMalformed.
 	ErrOutOfRange = errors.New("modelusage: a usage count is out of range")
-	// ErrTruncated matches a *TruncatedError: a stream that ended, failed or reported an error before its
-	// final event.
+	// ErrTruncated is returned for a stream that ended, failed or carried an error event before its final
+	// event. When the stream yielded usage first, it comes inside a *PartialError.
 	ErrTruncated = errors.New("modelusage: the stream ended before its final event")
 )
 
-// TruncatedError is returned by ParseStream for a stream that ended, failed or carried an error event before
-// its final event. It matches ErrTruncated with errors.Is, and unwraps to the reader's error when the reader
-// failed.
+// PartialError is returned by ParseStream when a stream yielded at least one usage block and then stopped or
+// broke before its final event: it ended or was cut, carried an error event, a later event was malformed or
+// held a refused count, or it passed a byte limit. Err is the cause, so errors.Is still matches ErrTruncated,
+// ErrMalformed, ErrOutOfRange, ErrNoUsage, ErrTooLarge, ErrLineTooLong or the reader's error.
 //
-// The Usage returned with it is never final. When Partial is true it holds the counts of the usage blocks
-// read before the stream stopped, which can be lower than what the provider bills; when Partial is false it
-// is zero.
-type TruncatedError struct {
-	// Partial is set when the Usage returned with the error holds the counts read so far.
-	Partial bool
-	// Err is the reader's error, or nil when the stream ended or carried an error event.
+// The Usage returned with it is never zero and is a lower bound of what the provider reported: every count
+// is the largest value the stream carried before the problem, and nothing after the last usage block can
+// lower it. It is not final, and can be lower than what the provider bills. Each count and total is within
+// Limits.MaxTokens, but a breakdown may be larger than its parent, since the counts may be from between two
+// updates.
+type PartialError struct {
+	// Err is the cause. It is never nil.
 	Err error
 }
 
-func (e *TruncatedError) Error() string {
-	msg := "modelusage: the stream ended before its final event"
-	if e.Partial {
-		msg += ", with partial usage"
-	}
-	if e.Err != nil {
-		return msg + ": " + e.Err.Error()
-	}
-	return msg
+func (e *PartialError) Error() string { return "modelusage: partial usage: " + e.Err.Error() }
+
+// Unwrap returns the cause.
+func (e *PartialError) Unwrap() error { return e.Err }
+
+// TrailingError is returned by ParseStream when a stream sent its final event and then something that is not
+// allowed after it: an event that would change the counts or end the reply again, a malformed event, an
+// event cut by the end of the stream, a byte limit passed, or a reader error. Err is the cause, as in
+// PartialError.
+//
+// The Usage returned with it is the final usage, the same as with a nil error, since the counts were complete
+// at the final event. The error tells the caller that the bytes after it were wrong, for logging; it is not a
+// reason to doubt the counts.
+type TrailingError struct {
+	// Err is the cause. It is never nil.
+	Err error
 }
 
-// Is reports whether target is ErrTruncated.
-func (e *TruncatedError) Is(target error) bool { return target == ErrTruncated }
+func (e *TrailingError) Error() string {
+	return "modelusage: the usage is final, but the stream is wrong after its final event: " + e.Err.Error()
+}
 
-// Unwrap returns the reader's error, or nil.
-func (e *TruncatedError) Unwrap() error { return e.Err }
+// Unwrap returns the cause.
+func (e *TrailingError) Unwrap() error { return e.Err }
 
 // LimitError is returned when a reply or a stream line passes its byte limit. It matches ErrTooLarge or
 // ErrLineTooLong with errors.Is.
@@ -465,10 +475,17 @@ func openAIOf(ou *openAIUsage, f Family, maxTokens int64) (Usage, error) {
 	return u, nil
 }
 
-// validate checks every count and total against maxTokens, and that a part the provider's reference bounds by
-// its whole is no larger: the cache reads and writes within an OpenAI prompt, and the reasoning or thinking
-// tokens within the output. The cache write lifetimes are not checked (see Usage).
+// validate checks every count and total against maxTokens (checkRange) and that a part the provider's
+// reference bounds by its whole is no larger (checkParts).
 func (u Usage) validate(maxTokens int64) error {
+	if err := u.checkRange(maxTokens); err != nil {
+		return err
+	}
+	return u.checkParts()
+}
+
+// checkRange checks that every count, the whole prompt and the total are within [0, maxTokens].
+func (u Usage) checkRange(maxTokens int64) error {
 	for _, n := range []int64{u.InputTokens, u.OutputTokens, u.CacheCreationInputTokens,
 		u.CacheCreation5mInputTokens, u.CacheCreation1hInputTokens, u.CacheReadInputTokens, u.CachedPromptTokens,
 		u.CacheWritePromptTokens, u.CacheWrite30mPromptTokens, u.CacheWrite12hPromptTokens, u.ReasoningTokens} {
@@ -480,6 +497,13 @@ func (u Usage) validate(maxTokens int64) error {
 	if u.TotalInputTokens() > maxTokens || u.TotalTokens() > maxTokens {
 		return ErrOutOfRange
 	}
+	return nil
+}
+
+// checkParts checks the parts the references bound by their whole: the cache reads and writes within an
+// OpenAI prompt, and the reasoning or thinking tokens within the output. The cache write lifetimes are not
+// checked (see Usage).
+func (u Usage) checkParts() error {
 	if u.CachedPromptTokens+u.CacheWritePromptTokens > u.InputTokens && u.Family != Anthropic {
 		return ErrOutOfRange
 	}
@@ -487,4 +511,22 @@ func (u Usage) validate(maxTokens int64) error {
 		return ErrOutOfRange
 	}
 	return nil
+}
+
+// maxOf returns, count by count, the larger of a and b, with the family of b.
+func maxOf(a, b Usage) Usage {
+	return Usage{
+		Family:                     b.Family,
+		InputTokens:                max(a.InputTokens, b.InputTokens),
+		OutputTokens:               max(a.OutputTokens, b.OutputTokens),
+		CacheCreationInputTokens:   max(a.CacheCreationInputTokens, b.CacheCreationInputTokens),
+		CacheCreation5mInputTokens: max(a.CacheCreation5mInputTokens, b.CacheCreation5mInputTokens),
+		CacheCreation1hInputTokens: max(a.CacheCreation1hInputTokens, b.CacheCreation1hInputTokens),
+		CacheReadInputTokens:       max(a.CacheReadInputTokens, b.CacheReadInputTokens),
+		CachedPromptTokens:         max(a.CachedPromptTokens, b.CachedPromptTokens),
+		CacheWritePromptTokens:     max(a.CacheWritePromptTokens, b.CacheWritePromptTokens),
+		CacheWrite30mPromptTokens:  max(a.CacheWrite30mPromptTokens, b.CacheWrite30mPromptTokens),
+		CacheWrite12hPromptTokens:  max(a.CacheWrite12hPromptTokens, b.CacheWrite12hPromptTokens),
+		ReasoningTokens:            max(a.ReasoningTokens, b.ReasoningTokens),
+	}
 }

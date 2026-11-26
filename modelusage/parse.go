@@ -71,38 +71,39 @@ func usageOf(v []byte, f Family, maxTokens int64) (Usage, error) {
 // allows. Comment lines and fields other than data are ignored; the data lines of one event are joined with
 // LF and decoded as one JSON value. Events of unknown types are ignored.
 //
-// After the final event, a second final event, or an event that would change the counts, is ErrMalformed.
-// Other events after it are ignored, including an error event, since the counts are already final: the
-// Anthropic stream may send ping events at any point, and the Responses API reference does not say that
-// the final event is the last one sent. Chat completions are stricter: their reference ends the stream with
-// [DONE], so any event after it is ErrMalformed.
-//
 // Which usage counts, per family:
 //
 //   - Anthropic: message_start carries the first usage block in message.usage, and each message_delta a
-//     usage block whose counts are cumulative. A count present in a later block replaces the earlier one,
-//     and a count absent or null keeps it. The final event is message_stop. A second message_start is
-//     ErrMalformed. Without input_tokens and output_tokens at the end, the result is ErrNoUsage.
+//     usage block whose counts are cumulative. Each count is the largest value any block reported for it: a
+//     count absent or null keeps the earlier one, and a lower one does not replace it. The final event is
+//     message_stop. A second message_start is ErrMalformed. Without input_tokens and output_tokens at the
+//     end, the result is ErrNoUsage.
 //   - OpenAIChat: usage arrives in a chunk with a non-null usage field (with stream_options.include_usage,
-//     the last chunk before [DONE]). When more than one chunk carries usage, the last one wins, since each
-//     reports the whole request so far. The final event is data: [DONE]. A stream that ends with [DONE] and
-//     no usage is ErrNoUsage.
+//     the last chunk before [DONE]). Each chunk reports the whole request so far, so when more than one
+//     carries usage each count is the largest reported, which is the last chunk's in a correct stream. The
+//     final event is data: [DONE]. A stream that reaches [DONE] with no usage is ErrNoUsage.
 //   - OpenAIResponses: usage is read only from the response.usage of the final event, which is one of
-//     response.completed, response.incomplete or response.failed; usage in earlier events is ignored. A
-//     second final event is ErrMalformed, because the counts of two responses cannot be told apart. A [DONE]
-//     line after the final event, which servers that copy chat completions send, is ignored.
+//     response.completed, response.incomplete or response.failed; usage in earlier events is ignored. One
+//     [DONE] line after the final event, which servers that copy chat completions send, is allowed.
 //
-// The Usage is final only when the error is nil. A stream that ends before its final event, whose reader
-// fails after at least one usage block, or that carries an error event (Anthropic and Responses type error,
-// or a chat chunk with an error field) returns a *TruncatedError, which matches ErrTruncated and wraps the
-// reader's error if there was one. With it comes the usage read so far, the counts of the last complete
-// usage block, which can be lower than what the provider bills: TruncatedError.Partial tells whether there
-// is any. An event cut off by the end of the stream counts as missing, not malformed. A reader error after
-// the final event does not change the result, since the counts are already final.
+// The result follows one rule: once the stream has yielded a usage block, nothing that follows can make the
+// returned usage less than that block. So the error decides how to use the Usage:
 //
-// Other errors: ErrInvalidLimits, a *LimitError matching ErrTooLarge or ErrLineTooLong, ErrMalformed,
-// ErrNoUsage, ErrOutOfRange, or the reader's own error wrapped when it fails before any usage block. With
-// these the Usage is zero.
+//   - nil: the stream was clean and complete. The Usage is final.
+//   - *TrailingError: the final event was read, then something not allowed after it (a second final event
+//     or [DONE], an event that would change the counts, a malformed or cut event, a byte limit, a reader
+//     error, an error event). The Usage is final, the same as with a nil error. After the final event, Anthropic
+//     ping events and events of unknown types, and Responses events other than a final or error event, are
+//     allowed: the Anthropic stream may send ping events at any point, and the Responses API reference does
+//     not say that the final event is the last one sent. In chat completions nothing is allowed after [DONE].
+//   - *PartialError: usage was read, then the stream stopped or broke before its final event. The Usage is
+//     the best seen so far, a lower bound, never zero. errors.Is matches the cause: ErrTruncated (the stream
+//     ended, an event was cut by the end, the reader failed, which it also wraps, or an error event came:
+//     Anthropic and Responses type error, or a chat chunk with an error field), ErrMalformed, ErrOutOfRange,
+//     ErrNoUsage, ErrTooLarge or ErrLineTooLong. A block refused for a bad count is not merged.
+//   - any other error, with a zero Usage: no usage had been read. ErrInvalidLimits, a *LimitError matching
+//     ErrTooLarge or ErrLineTooLong, ErrMalformed, ErrNoUsage, ErrOutOfRange, ErrTruncated, or the reader's
+//     own error wrapped.
 func ParseStream(f Family, r io.Reader, lim Limits) (Usage, error) {
 	if err := lim.check(f, true); err != nil {
 		return Usage{}, err
@@ -114,23 +115,24 @@ func ParseStream(f Family, r io.Reader, lim Limits) (Usage, error) {
 	sc.Buffer(make([]byte, 0, min(4096, lim.MaxLineBytes+5)), lim.MaxLineBytes+5)
 	sc.Split(scanLines)
 	st := &streamState{family: f, maxTokens: lim.MaxTokens}
+	lineLimit := &LimitError{Line: true, Limit: int64(lim.MaxLineBytes)}
 	var data []byte
 	pending, first := false, true
 	for sc.Scan() {
 		if br.over() {
-			return Usage{}, &LimitError{Limit: lim.MaxBytes}
+			return st.stop(&LimitError{Limit: lim.MaxBytes})
 		}
 		line := sc.Bytes()
 		if first {
 			line, first = bytes.TrimPrefix(line, byteOrderMark), false
 		}
 		if len(line) > lim.MaxLineBytes {
-			return Usage{}, &LimitError{Line: true, Limit: int64(lim.MaxLineBytes)}
+			return st.stop(lineLimit)
 		}
 		if len(line) == 0 {
 			if pending {
 				if err := st.event(data); err != nil {
-					return st.fail(err)
+					return st.stop(err)
 				}
 				data, pending = data[:0], false
 			}
@@ -152,40 +154,38 @@ func ParseStream(f Family, r io.Reader, lim Limits) (Usage, error) {
 		// The joined data of one event is held to the line limit too, so that many data lines cannot make one
 		// event as large as the whole reply.
 		if len(data) > lim.MaxLineBytes {
-			return Usage{}, &LimitError{Line: true, Limit: int64(lim.MaxLineBytes)}
+			return st.stop(lineLimit)
 		}
 	}
 	if br.over() {
-		return Usage{}, &LimitError{Limit: lim.MaxBytes}
+		return st.stop(&LimitError{Limit: lim.MaxBytes})
 	}
 	if err := sc.Err(); err != nil {
-		if errors.Is(err, bufio.ErrTooLong) {
-			return Usage{}, &LimitError{Line: true, Limit: int64(lim.MaxLineBytes)}
-		}
 		switch {
+		case errors.Is(err, bufio.ErrTooLong):
+			return st.stop(lineLimit)
 		case st.done:
-			// The final event was read, so the counts are final: a cut after it loses nothing.
-			return st.finish()
+			return st.stop(fmt.Errorf("modelusage: reading the stream after its final event: %w", err))
 		case st.seen:
-			return st.truncated(err)
+			return st.stop(fmt.Errorf("%w: %w", ErrTruncated, err))
 		}
 		return Usage{}, fmt.Errorf("modelusage: reading the stream: %w", err)
 	}
 	if pending {
 		// The stream ended without the blank line that closes an event. A complete event still counts; a cut
-		// one is the sign of a cut stream, and after the final event it changes nothing.
+		// one before the final event is the sign of a cut stream.
 		wasDone := st.done
 		if err := st.event(data); err != nil {
-			switch {
-			case errors.Is(err, ErrMalformed) && wasDone:
-			case errors.Is(err, ErrMalformed):
-				return st.fail(ErrTruncated)
-			default:
-				return st.fail(err)
+			if errors.Is(err, ErrMalformed) && !wasDone {
+				err = ErrTruncated
 			}
+			return st.stop(err)
 		}
 	}
-	return st.finish()
+	if !st.done {
+		return st.stop(ErrTruncated)
+	}
+	return st.final, nil
 }
 
 // byteOrderMark is the UTF-8 byte order mark, skipped at the start of a reply or a stream.
@@ -218,10 +218,12 @@ type streamState struct {
 	family    Family
 	maxTokens int64
 	started   bool           // Anthropic: message_start seen
-	acc       anthropicUsage // Anthropic: the counts so far, each replaced by a later present one
-	usage     Usage          // OpenAI: the last complete usage block
+	acc       anthropicUsage // Anthropic: the largest value of each count so far
+	usage     Usage          // chat completions: the largest value of each count so far
+	final     Usage          // the usage at the final event
 	seen      bool           // a usage block was read
 	done      bool           // the final event was read
+	doneLines int            // Responses: [DONE] lines after the final event
 }
 
 // event handles the data of one event. After the final event, an event that would change the counts or end
@@ -321,17 +323,23 @@ func (s *streamState) anthropicEvent(data []byte) error {
 		if !s.started || s.done {
 			return ErrMalformed
 		}
-		s.done = true
+		u, err := anthropicOf(&s.acc, s.maxTokens)
+		if err != nil {
+			return err
+		}
+		s.final, s.done = u, true
 	case typeError:
+		// Before the final event an error event ends the reply early; after it, it has no place.
 		if s.done {
-			return nil
+			return ErrMalformed
 		}
 		return ErrTruncated
 	}
 	return nil
 }
 
-// merge replaces each count of the Anthropic total that the raw usage block v carries.
+// merge raises each count of the Anthropic total to the one the raw usage block v carries, when that is
+// larger. A block with a refused count, or one that would take a count or total past the limit, is not merged.
 func (s *streamState) merge(v []byte) error {
 	au, err := readAnthropicUsage(v)
 	if err != nil || au == nil {
@@ -341,12 +349,16 @@ func (s *streamState) merge(v []byte) error {
 	if err := firstErr(from...); err != nil {
 		return err
 	}
-	for i, to := range s.acc.counts() {
-		if from[i].set {
+	next := s.acc
+	for i, to := range next.counts() {
+		if from[i].set && (!to.set || from[i].n > to.n) {
 			*to = *from[i]
 		}
 	}
-	s.seen = true
+	if err := next.usage().checkRange(s.maxTokens); err != nil {
+		return err
+	}
+	s.acc, s.seen = next, true
 	return nil
 }
 
@@ -354,8 +366,11 @@ func (s *streamState) chatEvent(data []byte) error {
 	if s.done {
 		return ErrMalformed
 	}
-	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
-		s.done = true
+	if isDone(data) {
+		if !s.seen {
+			return ErrNoUsage
+		}
+		s.final, s.done = s.usage, true
 		return nil
 	}
 	ev, err := decodeEvent(data)
@@ -372,12 +387,20 @@ func (s *streamState) chatEvent(data []byte) error {
 	if err != nil {
 		return err
 	}
+	if s.seen {
+		if u = maxOf(s.usage, u); u.validate(s.maxTokens) != nil {
+			return ErrOutOfRange
+		}
+	}
 	s.usage, s.seen = u, true
 	return nil
 }
 
 func (s *streamState) responsesEvent(data []byte) error {
-	if s.done && bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+	if s.done && isDone(data) {
+		if s.doneLines++; s.doneLines > 1 {
+			return ErrMalformed
+		}
 		return nil
 	}
 	ev, err := decodeEvent(data)
@@ -400,58 +423,32 @@ func (s *streamState) responsesEvent(data []byte) error {
 		if err != nil {
 			return err
 		}
-		s.usage, s.seen, s.done = u, true, true
+		s.final, s.seen, s.done = u, true, true
 	case typeError:
+		// Before the final event an error event ends the reply early; after it, it has no place.
 		if s.done {
-			return nil
+			return ErrMalformed
 		}
 		return ErrTruncated
 	}
 	return nil
 }
 
-// fail returns err with a zero Usage, or a *TruncatedError with the usage read so far when err is
-// ErrTruncated.
-func (s *streamState) fail(err error) (Usage, error) {
-	if !errors.Is(err, ErrTruncated) {
-		return Usage{}, err
-	}
-	return s.truncated(nil)
-}
+// isDone reports whether the data of an event is the [DONE] line.
+func isDone(data []byte) bool { return bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) }
 
-// truncated returns the usage read so far with a *TruncatedError that wraps readErr, which may be nil.
-func (s *streamState) truncated(readErr error) (Usage, error) {
-	u := s.partial()
-	return u, &TruncatedError{Partial: u != (Usage{}), Err: readErr}
-}
-
-// partial is the usage read so far, or zero when none was read or it breaks a rule of Usage.
-func (s *streamState) partial() Usage {
-	if !s.seen {
-		return Usage{}
+// stop ends the parse on cause. After the final event the final usage comes with a *TrailingError; after a
+// usage block the best usage so far comes with a *PartialError; before any, cause comes alone.
+func (s *streamState) stop(cause error) (Usage, error) {
+	switch {
+	case s.done:
+		return s.final, &TrailingError{Err: cause}
+	case !s.seen:
+		return Usage{}, cause
+	case s.family == Anthropic:
+		return s.acc.usage(), &PartialError{Err: cause}
 	}
-	if s.family != Anthropic {
-		return s.usage
-	}
-	u := s.acc.usage()
-	if u.validate(s.maxTokens) != nil {
-		return Usage{}
-	}
-	return u
-}
-
-// finish returns the usage of a stream that ended.
-func (s *streamState) finish() (Usage, error) {
-	if !s.done {
-		return s.fail(ErrTruncated)
-	}
-	if s.family == Anthropic {
-		return anthropicOf(&s.acc, s.maxTokens)
-	}
-	if !s.seen {
-		return Usage{}, ErrNoUsage
-	}
-	return s.usage, nil
+	return s.usage, &PartialError{Err: cause}
 }
 
 // scanLines is a bufio.SplitFunc for server-sent events: a line ends in CRLF, LF or a bare CR, and the line

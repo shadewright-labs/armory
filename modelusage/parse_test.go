@@ -100,7 +100,7 @@ func TestParseStreamFixtures(t *testing.T) {
 			want: Usage{Family: Anthropic, InputTokens: 25, OutputTokens: 1}},
 		{file: "chat-stream.sse", family: OpenAIChat, want: Usage{Family: OpenAIChat, InputTokens: 1200,
 			OutputTokens: 42, CachedPromptTokens: 1024}},
-		// Usage on every chunk: the last one wins, as each reports the whole request so far.
+		// Usage on every chunk: each count is the largest reported, the last chunk's in a correct stream.
 		{file: "chat-stream-twice.sse", family: OpenAIChat, want: Usage{Family: OpenAIChat, InputTokens: 300,
 			OutputTokens: 7}},
 		{file: "chat-stream-zero.sse", family: OpenAIChat, want: Usage{Family: OpenAIChat}},
@@ -117,8 +117,9 @@ func TestParseStreamFixtures(t *testing.T) {
 		{file: "responses-stream-incomplete.sse", family: OpenAIResponses, want: Usage{Family: OpenAIResponses,
 			InputTokens: 75, OutputTokens: 512, ReasoningTokens: 512}},
 		{file: "responses-stream-zero.sse", family: OpenAIResponses, want: Usage{Family: OpenAIResponses}},
-		// Two final events: the counts of two responses cannot be told apart, so neither wins.
-		{file: "responses-stream-twice.sse", family: OpenAIResponses, wantErr: ErrMalformed},
+		// Two final events: the first gives the final usage and the second is a trailing error.
+		{file: "responses-stream-twice.sse", family: OpenAIResponses, wantErr: ErrMalformed,
+			want: Usage{Family: OpenAIResponses, InputTokens: 75, OutputTokens: 1186, ReasoningTokens: 1024}},
 		{file: "responses-stream-truncated.sse", family: OpenAIResponses, wantErr: ErrTruncated},
 		{file: "responses-stream-no-usage.sse", family: OpenAIResponses, wantErr: ErrNoUsage},
 	}
@@ -292,13 +293,16 @@ func TestParseStreamInline(t *testing.T) {
 	)
 	ok := Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}
 	long := "data: {\"type\":\"ping\",\"pad\":\"" + strings.Repeat("x", 100) + "\"}"
+	start1 := Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 1}
+	chat1 := Usage{Family: OpenAIChat, InputTokens: 1, OutputTokens: 1}
 	tests := []struct {
-		name    string
-		family  Family
-		body    string
-		lim     Limits
-		want    Usage
-		wantErr error
+		name     string
+		family   Family
+		body     string
+		lim      Limits
+		want     Usage
+		wantErr  error
+		trailing bool // the error is a *TrailingError; otherwise, with a usage, a *PartialError
 	}{
 		{name: "ok", family: Anthropic, body: start + delta + stop, want: ok},
 		{name: "crlf and comments", family: Anthropic, body: strings.ReplaceAll(": keep-alive\n\n"+start+delta+stop,
@@ -311,11 +315,11 @@ func TestParseStreamInline(t *testing.T) {
 		{name: "event data at the line limit", family: Anthropic,
 			body: start + "data: " + strings.Repeat("x", 50) + "\ndata: " + strings.Repeat("y", 49) + "\n\n" +
 				delta + stop,
-			lim: Limits{MaxBytes: 4096, MaxLineBytes: 100, MaxTokens: 100}, wantErr: ErrMalformed},
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: 100, MaxTokens: 100}, wantErr: ErrMalformed, want: start1},
 		{name: "event data over the line limit", family: Anthropic,
 			body: start + "data: " + strings.Repeat("x", 50) + "\ndata: " + strings.Repeat("y", 50) + "\n\n" +
 				delta + stop,
-			lim: Limits{MaxBytes: 4096, MaxLineBytes: 100, MaxTokens: 100}, wantErr: ErrLineTooLong},
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: 100, MaxTokens: 100}, wantErr: ErrLineTooLong, want: start1},
 		{name: "no space after colon", family: Anthropic, body: strings.ReplaceAll(start+delta+stop, "data: ",
 			"data:"), want: ok},
 		{name: "data split over lines", family: Anthropic,
@@ -327,20 +331,22 @@ func TestParseStreamInline(t *testing.T) {
 		{name: "event cut at the end", family: Anthropic, body: start + delta + "data: {\"type\":\"message_st",
 			wantErr: ErrTruncated, want: ok},
 		{name: "empty stream", family: Anthropic, body: "", wantErr: ErrTruncated},
-		{name: "malformed event", family: Anthropic, body: start + "data: {nope}\n\n" + stop, wantErr: ErrMalformed},
+		{name: "malformed event", family: Anthropic, body: start + "data: {nope}\n\n" + stop, wantErr: ErrMalformed,
+			want: start1},
 		// After the final event, an event that would change the counts or end the reply again is malformed;
 		// any other is ignored.
 		{name: "delta after the final event", family: Anthropic, body: start + delta + stop + delta,
-			wantErr: ErrMalformed},
+			wantErr: ErrMalformed, want: ok, trailing: true},
 		{name: "start after the final event", family: Anthropic, body: start + delta + stop + start,
-			wantErr: ErrMalformed},
-		{name: "second message_stop", family: Anthropic, body: start + delta + stop + stop, wantErr: ErrMalformed},
+			wantErr: ErrMalformed, want: ok, trailing: true},
+		{name: "second message_stop", family: Anthropic, body: start + delta + stop + stop, wantErr: ErrMalformed,
+			want: ok, trailing: true},
 		{name: "ping after the final event", family: Anthropic,
 			body: start + delta + stop + "data: {\"type\":\"ping\"}\n\n", want: ok},
 		{name: "unknown event after the final event", family: Anthropic,
 			body: start + delta + stop + "event: x\ndata: {\"type\":\"x\"}", want: ok},
 		{name: "malformed event after the final event", family: Anthropic, body: start + delta + stop + "data: {\n\n",
-			wantErr: ErrMalformed},
+			wantErr: ErrMalformed, want: ok, trailing: true},
 		{name: "responses done after the final event", family: OpenAIResponses,
 			body: "data: {\"type\":\"response.completed\",\"response\":" +
 				"{\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\n" +
@@ -353,7 +359,7 @@ func TestParseStreamInline(t *testing.T) {
 			want: Usage{Family: OpenAIResponses, InputTokens: 2, OutputTokens: 3}},
 		{name: "chat second done", family: OpenAIChat,
 			body:    "data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\ndata: [DONE]\n\ndata: [DONE]\n\n",
-			wantErr: ErrMalformed},
+			wantErr: ErrMalformed, want: chat1, trailing: true},
 		{name: "breakdowns across events", family: Anthropic,
 			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
 				"\"cache_creation_input_tokens\":30,\"cache_creation\":{\"ephemeral_5m_input_tokens\":10," +
@@ -382,18 +388,20 @@ func TestParseStreamInline(t *testing.T) {
 		{name: "thinking above output across events", family: Anthropic,
 			body: start + "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9," +
 				"\"output_tokens_details\":{\"thinking_tokens\":10}}}\n\n" + stop,
-			wantErr: ErrOutOfRange},
+			wantErr: ErrOutOfRange, want: Usage{Family: Anthropic, InputTokens: 5,
+				OutputTokens: 9, ReasoningTokens: 10}},
 		{name: "event type in upper case", family: Anthropic, body: start + delta + "data: {\"TYPE\":\"message_stop\"}\n\n",
 			wantErr: ErrTruncated, want: ok},
 		{name: "event type twice", family: Anthropic,
-			body: start + delta + "data: {\"type\":\"ping\",\"type\":\"message_stop\"}\n\n", wantErr: ErrMalformed},
-		{name: "second message_start", family: Anthropic, body: start + start + delta + stop, wantErr: ErrMalformed},
+			body: start + delta + "data: {\"type\":\"ping\",\"type\":\"message_stop\"}\n\n", wantErr: ErrMalformed, want: ok},
+		{name: "second message_start", family: Anthropic, body: start + start + delta + stop, wantErr: ErrMalformed,
+			want: start1},
 		{name: "delta before start", family: Anthropic, body: delta + start + stop, wantErr: ErrMalformed},
 		{name: "no input count", family: Anthropic, body: "data: {\"type\":\"message_start\",\"message\":{}}\n\n" +
-			delta + stop, wantErr: ErrNoUsage},
+			delta + stop, wantErr: ErrNoUsage, want: Usage{Family: Anthropic, OutputTokens: 9}},
 		{name: "negative delta", family: Anthropic, body: start +
 			"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":-9}}\n\n" + stop,
-			wantErr: ErrOutOfRange},
+			wantErr: ErrOutOfRange, want: start1},
 		{name: "null delta count keeps the earlier one", family: Anthropic,
 			body: start + delta + "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":null}}\n\n" + stop,
 			want: ok},
@@ -402,19 +410,19 @@ func TestParseStreamInline(t *testing.T) {
 		{name: "line at the limit with crlf", family: Anthropic, body: start + long + "\r\n\r\n" + delta + stop,
 			lim: Limits{MaxBytes: 4096, MaxLineBytes: len(long), MaxTokens: 100}, want: ok},
 		{name: "oversized line", family: Anthropic, body: start + long + "x\n\n" + delta + stop,
-			lim: Limits{MaxBytes: 4096, MaxLineBytes: len(long), MaxTokens: 100}, wantErr: ErrLineTooLong},
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: len(long), MaxTokens: 100}, wantErr: ErrLineTooLong, want: start1},
 		{name: "oversized line without newline", family: Anthropic, body: start + long + strings.Repeat("x", 1000),
-			lim: Limits{MaxBytes: 4096, MaxLineBytes: len(long), MaxTokens: 100}, wantErr: ErrLineTooLong},
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: len(long), MaxTokens: 100}, wantErr: ErrLineTooLong, want: start1},
 		{name: "stream over the byte limit", family: Anthropic, body: start + delta + stop + "\n",
 			lim:     Limits{MaxBytes: int64(len(start + delta + stop)), MaxLineBytes: 1024, MaxTokens: 100},
 			wantErr: ErrTooLarge},
 		{name: "stream at the byte limit", family: Anthropic, body: start + delta + stop,
 			lim: Limits{MaxBytes: int64(len(start + delta + stop)), MaxLineBytes: 1024, MaxTokens: 100}, want: ok},
 		{name: "count above max", family: Anthropic, body: start + delta + stop,
-			lim: Limits{MaxBytes: 4096, MaxLineBytes: 1024, MaxTokens: 8}, wantErr: ErrOutOfRange},
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: 1024, MaxTokens: 8}, wantErr: ErrOutOfRange, want: start1},
 		{name: "chat data after done", family: OpenAIChat,
 			body:    "data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\ndata: [DONE]\n\ndata: {}\n\n",
-			wantErr: ErrMalformed},
+			wantErr: ErrMalformed, want: chat1, trailing: true},
 		{name: "chat non-json data", family: OpenAIChat, body: "data: hello\n\ndata: [DONE]\n\n",
 			wantErr: ErrMalformed},
 		{name: "chat usage without counts", family: OpenAIChat, body: "data: {\"usage\":{}}\n\ndata: [DONE]\n\n",
@@ -450,6 +458,14 @@ func TestParseStreamInline(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("usage = %+v, want %+v", got, tt.want)
+			}
+			var (
+				pe *PartialError
+				te *TrailingError
+			)
+			wantPartial := err != nil && tt.want != (Usage{}) && !tt.trailing
+			if errors.As(err, &pe) != wantPartial || errors.As(err, &te) != tt.trailing {
+				t.Errorf("err = %#v, want a PartialError %v, a TrailingError %v", err, wantPartial, tt.trailing)
 			}
 		})
 	}
@@ -511,7 +527,8 @@ func TestStreamReaderError(t *testing.T) {
 		readErr   error
 		want      Usage
 		truncated bool
-		partial   bool
+		partial   bool // a *PartialError
+		trailing  bool // a *TrailingError
 	}{
 		{name: "anthropic cut after usage", family: Anthropic, body: start + delta, readErr: cut,
 			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}, truncated: true, partial: true},
@@ -524,8 +541,10 @@ func TestStreamReaderError(t *testing.T) {
 			truncated: true},
 		{name: "end after usage", family: Anthropic, body: start, readErr: io.EOF,
 			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 1}, truncated: true, partial: true},
-		// The final event was read, so the counts are final whatever the reader reports after it.
+		// The final event was read, so the counts are final; the reader error is reported beside them.
 		{name: "cut after the final event", family: Anthropic, body: start + delta + stop, readErr: cut,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}, trailing: true},
+		{name: "end after the final event", family: Anthropic, body: start + delta + stop, readErr: io.EOF,
 			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}},
 	}
 	for _, tt := range tests {
@@ -537,16 +556,19 @@ func TestStreamReaderError(t *testing.T) {
 			if errors.Is(err, ErrTruncated) != tt.truncated {
 				t.Errorf("err = %v, ErrTruncated %v, want %v", err, errors.Is(err, ErrTruncated), tt.truncated)
 			}
-			final := tt.want != (Usage{}) && !tt.truncated
-			if final != (err == nil) {
-				t.Errorf("err = %v, want an error: %v", err, !final)
+			clean := errors.Is(tt.readErr, io.EOF) && !tt.truncated
+			if clean != (err == nil) {
+				t.Errorf("err = %v, want an error: %v", err, !clean)
 			}
-			if !errors.Is(tt.readErr, io.EOF) && !final && !errors.Is(err, tt.readErr) {
+			if !errors.Is(tt.readErr, io.EOF) && !errors.Is(err, tt.readErr) {
 				t.Errorf("err = %v, want it to wrap the reader's error", err)
 			}
-			var te *TruncatedError
-			if errors.As(err, &te) != tt.truncated || (te != nil && te.Partial != tt.partial) {
-				t.Errorf("err = %#v, want a TruncatedError %v with Partial %v", err, tt.truncated, tt.partial)
+			var (
+				pe *PartialError
+				te *TrailingError
+			)
+			if errors.As(err, &pe) != tt.partial || errors.As(err, &te) != tt.trailing {
+				t.Errorf("err = %#v, want a PartialError %v, a TrailingError %v", err, tt.partial, tt.trailing)
 			}
 		})
 	}
