@@ -32,7 +32,10 @@ func TestParseJSONFixtures(t *testing.T) {
 		{file: "anthropic-reply.json", family: Anthropic, want: Usage{Family: Anthropic, InputTokens: 25,
 			OutputTokens: 15}},
 		{file: "anthropic-reply-cache.json", family: Anthropic, want: Usage{Family: Anthropic, InputTokens: 50,
-			OutputTokens: 503, CacheCreationInputTokens: 248, CacheReadInputTokens: 1800}},
+			OutputTokens: 503, CacheCreationInputTokens: 248, CacheReadInputTokens: 1800,
+			CacheCreation5mInputTokens: 148, CacheCreation1hInputTokens: 100}},
+		{file: "anthropic-reply-thinking.json", family: Anthropic, want: Usage{Family: Anthropic, InputTokens: 30,
+			OutputTokens: 420, ReasoningTokens: 380}},
 		{file: "anthropic-reply-null-cache.json", family: Anthropic, want: Usage{Family: Anthropic, InputTokens: 12,
 			OutputTokens: 7}},
 		{file: "anthropic-reply-zero.json", family: Anthropic, want: Usage{Family: Anthropic}},
@@ -50,7 +53,8 @@ func TestParseJSONFixtures(t *testing.T) {
 		{file: "responses-reply.json", family: OpenAIResponses, want: Usage{Family: OpenAIResponses, InputTokens: 75,
 			OutputTokens: 1186, ReasoningTokens: 1024}},
 		{file: "responses-reply-cache.json", family: OpenAIResponses, want: Usage{Family: OpenAIResponses,
-			InputTokens: 12000, OutputTokens: 20, CachedPromptTokens: 4000, CacheWritePromptTokens: 7000}},
+			InputTokens: 12000, OutputTokens: 20, CachedPromptTokens: 4000, CacheWritePromptTokens: 7000,
+			CacheWrite30mPromptTokens: 3000, CacheWrite12hPromptTokens: 4000}},
 		{file: "responses-reply-chat-usage.json", family: OpenAIResponses, wantErr: ErrNoUsage},
 		// The usage block of each family is read only under that family.
 		{file: "anthropic-reply.json", family: OpenAIChat, wantErr: ErrNoUsage},
@@ -108,7 +112,8 @@ func TestParseStreamFixtures(t *testing.T) {
 		{file: "responses-stream.sse", family: OpenAIResponses, want: Usage{Family: OpenAIResponses, InputTokens: 75,
 			OutputTokens: 1186, ReasoningTokens: 1024}},
 		{file: "responses-stream-cache.sse", family: OpenAIResponses, want: Usage{Family: OpenAIResponses,
-			InputTokens: 12000, OutputTokens: 20, CachedPromptTokens: 4000, CacheWritePromptTokens: 7000}},
+			InputTokens: 12000, OutputTokens: 20, CachedPromptTokens: 4000, CacheWritePromptTokens: 7000,
+			CacheWrite30mPromptTokens: 3000, CacheWrite12hPromptTokens: 4000}},
 		{file: "responses-stream-incomplete.sse", family: OpenAIResponses, want: Usage{Family: OpenAIResponses,
 			InputTokens: 75, OutputTokens: 512, ReasoningTokens: 512}},
 		{file: "responses-stream-zero.sse", family: OpenAIResponses, want: Usage{Family: OpenAIResponses}},
@@ -151,6 +156,45 @@ func TestParseJSONInline(t *testing.T) {
 		{name: "trailing data", family: Anthropic, body: anthropicOK + `{}`, wantErr: ErrMalformed},
 		{name: "usage not an object", family: Anthropic, body: `{"usage":5}`, wantErr: ErrMalformed},
 		{name: "usage null", family: OpenAIResponses, body: `{"usage":null}`, wantErr: ErrNoUsage},
+		// A breakdown is part of its parent count: equal or lower is accepted, higher is out of range.
+		{name: "anthropic cache write lifetimes", family: Anthropic,
+			body: `{"usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":10,` +
+				`"cache_creation":{"ephemeral_5m_input_tokens":6,"ephemeral_1h_input_tokens":4}}}`,
+			want: Usage{Family: Anthropic, InputTokens: 1, OutputTokens: 2, CacheCreationInputTokens: 10,
+				CacheCreation5mInputTokens: 6, CacheCreation1hInputTokens: 4}},
+		{name: "anthropic cache write lifetimes above the writes", family: Anthropic,
+			body: `{"usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":10,` +
+				`"cache_creation":{"ephemeral_5m_input_tokens":6,"ephemeral_1h_input_tokens":5}}}`,
+			wantErr: ErrOutOfRange},
+		{name: "anthropic cache write lifetimes without the writes", family: Anthropic,
+			body:    `{"usage":{"input_tokens":1,"output_tokens":2,"cache_creation":{"ephemeral_1h_input_tokens":5}}}`,
+			wantErr: ErrOutOfRange},
+		{name: "anthropic cache_creation not an object", family: Anthropic,
+			body: `{"usage":{"input_tokens":1,"output_tokens":2,"cache_creation":3}}`, wantErr: ErrMalformed},
+		{name: "anthropic thinking above output", family: Anthropic,
+			body:    `{"usage":{"input_tokens":1,"output_tokens":2,"output_tokens_details":{"thinking_tokens":3}}}`,
+			wantErr: ErrOutOfRange},
+		{name: "anthropic thinking not an integer", family: Anthropic,
+			body:    `{"usage":{"input_tokens":1,"output_tokens":2,"output_tokens_details":{"thinking_tokens":1.5}}}`,
+			wantErr: ErrMalformed},
+		// Server tool use is a count of requests, not tokens, and is not read.
+		{name: "anthropic server tool requests", family: Anthropic,
+			body: `{"usage":{"input_tokens":1,"output_tokens":2,"server_tool_use":{"web_search_requests":9}}}`,
+			want: Usage{Family: Anthropic, InputTokens: 1, OutputTokens: 2}},
+		{name: "responses cache write lifetimes below the writes", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":20,"output_tokens":2,"input_tokens_details":{"cache_write_tokens":10,` +
+				`"cache_write_tokens_details":{"ttl_30m_tokens":3}}}}`,
+			want: Usage{Family: OpenAIResponses, InputTokens: 20, OutputTokens: 2, CacheWritePromptTokens: 10,
+				CacheWrite30mPromptTokens: 3}},
+		{name: "responses cache write lifetimes above the writes", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":20,"output_tokens":2,"input_tokens_details":{"cache_write_tokens":10,` +
+				`"cache_write_tokens_details":{"ttl_30m_tokens":3,"ttl_12h_tokens":8}}}}`,
+			wantErr: ErrOutOfRange},
+		// The chat reference has no cache_write_tokens_details, so it is not read there.
+		{name: "chat cache write lifetimes not read", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":20,"completion_tokens":2,"prompt_tokens_details":{"cache_write_tokens":10,` +
+				`"cache_write_tokens_details":{"ttl_30m_tokens":3,"ttl_12h_tokens":7}}}}`,
+			want: Usage{Family: OpenAIChat, InputTokens: 20, OutputTokens: 2, CacheWritePromptTokens: 10}},
 		// Keys match exactly, never ignoring case.
 		{name: "upper-case keys", family: Anthropic, body: `{"USAGE":{"Input_Tokens":5,"output_tokens":1}}`,
 			wantErr: ErrNoUsage},
@@ -295,6 +339,18 @@ func TestParseStreamInline(t *testing.T) {
 		{name: "chat second done", family: OpenAIChat,
 			body:    "data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\ndata: [DONE]\n\ndata: [DONE]\n\n",
 			wantErr: ErrMalformed},
+		{name: "breakdowns across events", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
+				"\"cache_creation_input_tokens\":30,\"cache_creation\":{\"ephemeral_5m_input_tokens\":10," +
+				"\"ephemeral_1h_input_tokens\":20}}}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9," +
+				"\"output_tokens_details\":{\"thinking_tokens\":4}}}\n\n" + stop,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9, CacheCreationInputTokens: 30,
+				CacheCreation5mInputTokens: 10, CacheCreation1hInputTokens: 20, ReasoningTokens: 4}},
+		{name: "thinking above output across events", family: Anthropic,
+			body: start + "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9," +
+				"\"output_tokens_details\":{\"thinking_tokens\":10}}}\n\n" + stop,
+			wantErr: ErrOutOfRange},
 		{name: "event type in upper case", family: Anthropic, body: start + delta + "data: {\"TYPE\":\"message_stop\"}\n\n",
 			wantErr: ErrTruncated, want: ok},
 		{name: "event type twice", family: Anthropic,

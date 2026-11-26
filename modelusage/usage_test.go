@@ -54,3 +54,49 @@ func TestFamilyString(t *testing.T) {
 		}
 	}
 }
+
+// TestBreakdownsArePartsOfTheirParent checks that a breakdown never adds to the totals and that validate
+// refuses a breakdown whose sum is larger than its parent count.
+func TestBreakdownsArePartsOfTheirParent(t *testing.T) {
+	anthropic := Usage{Family: Anthropic, InputTokens: 50, OutputTokens: 500, CacheCreationInputTokens: 248,
+		CacheReadInputTokens: 1800}
+	withAnthropic := anthropic
+	withAnthropic.CacheCreation5mInputTokens, withAnthropic.CacheCreation1hInputTokens = 148, 100
+	withAnthropic.ReasoningTokens = 400
+	responses := Usage{Family: OpenAIResponses, InputTokens: 12000, OutputTokens: 20, CachedPromptTokens: 4000,
+		CacheWritePromptTokens: 7000}
+	withResponses := responses
+	withResponses.CacheWrite30mPromptTokens, withResponses.CacheWrite12hPromptTokens = 3000, 4000
+	for _, pair := range [][2]Usage{{anthropic, withAnthropic}, {responses, withResponses}} {
+		a, b := pair[0], pair[1]
+		if a.TotalInputTokens() != b.TotalInputTokens() || a.TotalTokens() != b.TotalTokens() ||
+			a.CacheWriteTokens() != b.CacheWriteTokens() || a.UncachedInputTokens() != b.UncachedInputTokens() {
+			t.Errorf("a breakdown changed the totals of %+v", b)
+		}
+		if err := b.validate(1 << 40); err != nil {
+			t.Errorf("validate(%+v) = %v, want nil", b, err)
+		}
+	}
+	over := []func(*Usage){
+		func(u *Usage) { u.CacheCreation5mInputTokens++ },
+		func(u *Usage) { u.CacheCreation1hInputTokens++ },
+		func(u *Usage) { u.ReasoningTokens = u.OutputTokens + 1 },
+	}
+	for i, f := range over {
+		u := withAnthropic
+		f(&u)
+		if err := u.validate(1 << 40); err != ErrOutOfRange { //nolint:errorlint // validate returns the sentinel
+			t.Errorf("anthropic case %d: validate = %v, want ErrOutOfRange", i, err)
+		}
+	}
+	for i, f := range []func(*Usage){
+		func(u *Usage) { u.CacheWrite30mPromptTokens++ },
+		func(u *Usage) { u.CacheWrite12hPromptTokens++ },
+	} {
+		u := withResponses
+		f(&u)
+		if err := u.validate(1 << 40); err != ErrOutOfRange { //nolint:errorlint // validate returns the sentinel
+			t.Errorf("responses case %d: validate = %v, want ErrOutOfRange", i, err)
+		}
+	}
+}

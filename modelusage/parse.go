@@ -386,13 +386,7 @@ func (s *streamState) partial() Usage {
 	if s.family != Anthropic {
 		return s.usage
 	}
-	u := Usage{
-		Family:                   Anthropic,
-		InputTokens:              s.acc.InputTokens.n,
-		OutputTokens:             s.acc.OutputTokens.n,
-		CacheCreationInputTokens: s.acc.CacheCreationInputTokens.n,
-		CacheReadInputTokens:     s.acc.CacheReadInputTokens.n,
-	}
+	u := s.acc.usage()
 	if u.validate(s.maxTokens) != nil {
 		return Usage{}
 	}

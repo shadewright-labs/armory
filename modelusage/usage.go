@@ -41,13 +41,24 @@ func (f Family) String() string {
 //   - Anthropic: input_tokens counts only the input after the last cache breakpoint. The cache writes
 //     (cache_creation_input_tokens) and cache reads (cache_read_input_tokens) are reported apart and are
 //     not part of it, so the whole prompt is InputTokens + CacheCreationInputTokens + CacheReadInputTokens.
-//     CachedPromptTokens, CacheWritePromptTokens and ReasoningTokens stay zero. OutputTokens counts every
-//     output token, thinking included.
+//     The cache writes by lifetime (cache_creation.ephemeral_5m_input_tokens and ephemeral_1h_input_tokens)
+//     are parts of CacheCreationInputTokens. OutputTokens counts every output token, thinking included, and
+//     ReasoningTokens (output_tokens_details.thinking_tokens) is a part of it. CachedPromptTokens,
+//     CacheWritePromptTokens and the OpenAI lifetimes stay zero.
 //   - OpenAIChat and OpenAIResponses: prompt_tokens (chat) or input_tokens (responses) is the whole prompt.
 //     Its details, cached_tokens (cache reads) and cache_write_tokens (cache writes), are parts of it, kept
-//     in CachedPromptTokens and CacheWritePromptTokens and never added again. completion_tokens or
-//     output_tokens is all output, and ReasoningTokens (reasoning_tokens) is a part of it.
-//     CacheCreationInputTokens and CacheReadInputTokens stay zero.
+//     in CachedPromptTokens and CacheWritePromptTokens and never added again. The Responses API also splits
+//     the cache writes by lifetime (cache_write_tokens_details.ttl_30m_tokens and ttl_12h_tokens), parts of
+//     CacheWritePromptTokens. completion_tokens or output_tokens is all output, and ReasoningTokens
+//     (reasoning_tokens) is a part of it. CacheCreationInputTokens, CacheReadInputTokens and the Anthropic
+//     lifetimes stay zero.
+//
+// A breakdown is a part of its parent count and never adds to a total. A provider may leave part of a
+// parent without a breakdown (an older model, or a field it does not send): the lifetimes of the cache
+// writes then sum to less than the writes, and the rest has no known lifetime. A breakdown that sums to
+// more than its parent is refused as ErrOutOfRange rather than accepted as reported, because both
+// references define it as a part of the parent, and a price per lifetime taken from it would charge more
+// than the parent the provider bills.
 //
 // A parser never returns a Usage that breaks these rules: the parts are never larger than their whole, and
 // every count and total is within the caller's [Limits.MaxTokens].
@@ -60,6 +71,12 @@ type Usage struct {
 	OutputTokens int64
 	// CacheCreationInputTokens is Anthropic's cache_creation_input_tokens, outside InputTokens.
 	CacheCreationInputTokens int64
+	// CacheCreation5mInputTokens is Anthropic's cache_creation.ephemeral_5m_input_tokens, the cache writes
+	// with a five-minute lifetime, a part of CacheCreationInputTokens.
+	CacheCreation5mInputTokens int64
+	// CacheCreation1hInputTokens is Anthropic's cache_creation.ephemeral_1h_input_tokens, the cache writes
+	// with a one-hour lifetime, a part of CacheCreationInputTokens.
+	CacheCreation1hInputTokens int64
 	// CacheReadInputTokens is Anthropic's cache_read_input_tokens, outside InputTokens.
 	CacheReadInputTokens int64
 	// CachedPromptTokens is OpenAI's cached_tokens (prompt_tokens_details or input_tokens_details), a part
@@ -67,8 +84,14 @@ type Usage struct {
 	CachedPromptTokens int64
 	// CacheWritePromptTokens is OpenAI's cache_write_tokens, a part of InputTokens, when reported.
 	CacheWritePromptTokens int64
-	// ReasoningTokens is OpenAI's reasoning_tokens (completion_tokens_details or output_tokens_details), a
-	// part of OutputTokens, when reported.
+	// CacheWrite30mPromptTokens is the Responses API's input_tokens_details.cache_write_tokens_details
+	// .ttl_30m_tokens, the cache writes with a 30-minute lifetime, a part of CacheWritePromptTokens.
+	CacheWrite30mPromptTokens int64
+	// CacheWrite12hPromptTokens is the Responses API's input_tokens_details.cache_write_tokens_details
+	// .ttl_12h_tokens, the cache writes with a 12-hour lifetime, a part of CacheWritePromptTokens.
+	CacheWrite12hPromptTokens int64
+	// ReasoningTokens is OpenAI's reasoning_tokens (completion_tokens_details or output_tokens_details) or
+	// Anthropic's output_tokens_details.thinking_tokens, a part of OutputTokens, when reported.
 	ReasoningTokens int64
 }
 
@@ -314,18 +337,31 @@ type anthropicUsage struct {
 	InputTokens              count
 	OutputTokens             count
 	CacheCreationInputTokens count
+	CacheCreation5m          count // cache_creation.ephemeral_5m_input_tokens
+	CacheCreation1h          count // cache_creation.ephemeral_1h_input_tokens
 	CacheReadInputTokens     count
+	ThinkingTokens           count // output_tokens_details.thinking_tokens
 }
 
 // counts lists every count of the block, in a fixed order.
 func (au *anthropicUsage) counts() []*count {
-	return []*count{&au.InputTokens, &au.OutputTokens, &au.CacheCreationInputTokens, &au.CacheReadInputTokens}
+	return []*count{&au.InputTokens, &au.OutputTokens, &au.CacheCreationInputTokens, &au.CacheCreation5m,
+		&au.CacheCreation1h, &au.CacheReadInputTokens, &au.ThinkingTokens}
 }
 
-// readAnthropicUsage reads the usage block o, which may be nil.
+// readAnthropicUsage reads the usage block o, which may be nil. server_tool_use counts requests, not tokens,
+// and is not read.
 func readAnthropicUsage(o object) (*anthropicUsage, error) {
 	if o == nil {
 		return nil, nil
+	}
+	creation, err := o.child("cache_creation")
+	if err != nil {
+		return nil, err
+	}
+	outDetails, err := o.child("output_tokens_details")
+	if err != nil {
+		return nil, err
 	}
 	au := &anthropicUsage{
 		InputTokens:              o.count("input_tokens"),
@@ -333,17 +369,25 @@ func readAnthropicUsage(o object) (*anthropicUsage, error) {
 		CacheCreationInputTokens: o.count("cache_creation_input_tokens"),
 		CacheReadInputTokens:     o.count("cache_read_input_tokens"),
 	}
+	if creation != nil {
+		au.CacheCreation5m = creation.count("ephemeral_5m_input_tokens")
+		au.CacheCreation1h = creation.count("ephemeral_1h_input_tokens")
+	}
+	if outDetails != nil {
+		au.ThinkingTokens = outDetails.count("thinking_tokens")
+	}
 	return au, nil
 }
 
 // openAIUsage is the usage block of one of the OpenAI APIs, read under the names of its family.
 type openAIUsage struct {
-	in, out, cached, written, reasoning count
+	in, out, cached, written, written30m, written12h, reasoning count
 }
 
 // readOpenAIUsage reads the usage block o of family f, which may be nil. Chat completions name the counts
 // prompt_tokens and completion_tokens with prompt_tokens_details and completion_tokens_details, the Responses
-// API input_tokens and output_tokens with input_tokens_details and output_tokens_details.
+// API input_tokens and output_tokens with input_tokens_details and output_tokens_details. Only the Responses
+// API reference defines cache_write_tokens_details, so it is read for that family alone.
 func readOpenAIUsage(o object, f Family) (*openAIUsage, error) {
 	if o == nil {
 		return nil, nil
@@ -363,6 +407,15 @@ func readOpenAIUsage(o object, f Family) (*openAIUsage, error) {
 	ou := &openAIUsage{in: o.count(inName), out: o.count(outName)}
 	if inDetails != nil {
 		ou.cached, ou.written = inDetails.count("cached_tokens"), inDetails.count("cache_write_tokens")
+		if f == OpenAIResponses {
+			lifetimes, err := inDetails.child("cache_write_tokens_details")
+			if err != nil {
+				return nil, err
+			}
+			if lifetimes != nil {
+				ou.written30m, ou.written12h = lifetimes.count("ttl_30m_tokens"), lifetimes.count("ttl_12h_tokens")
+			}
+		}
 	}
 	if outDetails != nil {
 		ou.reasoning = outDetails.count("reasoning_tokens")
@@ -391,17 +444,25 @@ func anthropicOf(au *anthropicUsage, maxTokens int64) (Usage, error) {
 	if !au.InputTokens.set || !au.OutputTokens.set {
 		return Usage{}, ErrNoUsage
 	}
-	u := Usage{
-		Family:                   Anthropic,
-		InputTokens:              au.InputTokens.n,
-		OutputTokens:             au.OutputTokens.n,
-		CacheCreationInputTokens: au.CacheCreationInputTokens.n,
-		CacheReadInputTokens:     au.CacheReadInputTokens.n,
-	}
+	u := au.usage()
 	if err := u.validate(maxTokens); err != nil {
 		return Usage{}, err
 	}
 	return u, nil
+}
+
+// usage converts the counts of the block as they are, absent ones as zero.
+func (au *anthropicUsage) usage() Usage {
+	return Usage{
+		Family:                     Anthropic,
+		InputTokens:                au.InputTokens.n,
+		OutputTokens:               au.OutputTokens.n,
+		CacheCreationInputTokens:   au.CacheCreationInputTokens.n,
+		CacheCreation5mInputTokens: au.CacheCreation5m.n,
+		CacheCreation1hInputTokens: au.CacheCreation1h.n,
+		CacheReadInputTokens:       au.CacheReadInputTokens.n,
+		ReasoningTokens:            au.ThinkingTokens.n,
+	}
 }
 
 // openAIOf converts a complete OpenAI usage block of family f. Input and output must both be present.
@@ -409,19 +470,22 @@ func openAIOf(ou *openAIUsage, f Family, maxTokens int64) (Usage, error) {
 	if ou == nil {
 		return Usage{}, ErrNoUsage
 	}
-	if err := firstErr(&ou.in, &ou.out, &ou.cached, &ou.written, &ou.reasoning); err != nil {
+	if err := firstErr(&ou.in, &ou.out, &ou.cached, &ou.written, &ou.written30m, &ou.written12h,
+		&ou.reasoning); err != nil {
 		return Usage{}, err
 	}
 	if !ou.in.set || !ou.out.set {
 		return Usage{}, ErrNoUsage
 	}
 	u := Usage{
-		Family:                 f,
-		InputTokens:            ou.in.n,
-		OutputTokens:           ou.out.n,
-		CachedPromptTokens:     ou.cached.n,
-		CacheWritePromptTokens: ou.written.n,
-		ReasoningTokens:        ou.reasoning.n,
+		Family:                    f,
+		InputTokens:               ou.in.n,
+		OutputTokens:              ou.out.n,
+		CachedPromptTokens:        ou.cached.n,
+		CacheWritePromptTokens:    ou.written.n,
+		CacheWrite30mPromptTokens: ou.written30m.n,
+		CacheWrite12hPromptTokens: ou.written12h.n,
+		ReasoningTokens:           ou.reasoning.n,
 	}
 	if err := u.validate(maxTokens); err != nil {
 		return Usage{}, err
@@ -429,10 +493,13 @@ func openAIOf(ou *openAIUsage, f Family, maxTokens int64) (Usage, error) {
 	return u, nil
 }
 
-// validate checks every count and total against maxTokens, and that no part is larger than its whole.
+// validate checks every count and total against maxTokens, and that no part is larger than its whole: the
+// cache reads and writes within an OpenAI prompt, each lifetime breakdown within its cache writes, and the
+// reasoning tokens within the output.
 func (u Usage) validate(maxTokens int64) error {
-	for _, n := range []int64{u.InputTokens, u.OutputTokens, u.CacheCreationInputTokens, u.CacheReadInputTokens,
-		u.CachedPromptTokens, u.CacheWritePromptTokens, u.ReasoningTokens} {
+	for _, n := range []int64{u.InputTokens, u.OutputTokens, u.CacheCreationInputTokens,
+		u.CacheCreation5mInputTokens, u.CacheCreation1hInputTokens, u.CacheReadInputTokens, u.CachedPromptTokens,
+		u.CacheWritePromptTokens, u.CacheWrite30mPromptTokens, u.CacheWrite12hPromptTokens, u.ReasoningTokens} {
 		if n < 0 || n > maxTokens {
 			return ErrOutOfRange
 		}
@@ -442,6 +509,10 @@ func (u Usage) validate(maxTokens int64) error {
 		return ErrOutOfRange
 	}
 	if u.CachedPromptTokens+u.CacheWritePromptTokens > u.InputTokens && u.Family != Anthropic {
+		return ErrOutOfRange
+	}
+	if u.CacheCreation5mInputTokens+u.CacheCreation1hInputTokens > u.CacheCreationInputTokens ||
+		u.CacheWrite30mPromptTokens+u.CacheWrite12hPromptTokens > u.CacheWritePromptTokens {
 		return ErrOutOfRange
 	}
 	if u.ReasoningTokens > u.OutputTokens {
