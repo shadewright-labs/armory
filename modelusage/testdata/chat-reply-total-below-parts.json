@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-test0003",
+  "object": "chat.completion",
+  "created": 1700000000,
+  "model": "gpt-example",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The pod is out of memory."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 19,
+    "completion_tokens": 10,
+    "total_tokens": 20
+  }
+}

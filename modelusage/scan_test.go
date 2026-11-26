@@ -66,6 +66,40 @@ func TestMembers(t *testing.T) {
 	}
 }
 
+func TestElements(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		want    []string
+		wantErr error
+	}{
+		{name: "null array", data: `null`},
+		{name: "empty array", data: `[]`},
+		{name: "whitespace empty", data: " [ \n\t ] "},
+		{name: "one object", data: `[{"type":"compaction","input_tokens":8}]`,
+			want: []string{`{"type":"compaction","input_tokens":8}`}},
+		{name: "mixed values", data: `[{"a":[1,2]}, "x]y", 3, null]`,
+			want: []string{`{"a":[1,2]}`, `"x]y"`, `3`, `null`}},
+		{name: "not an array", data: `{"a":1}`, wantErr: ErrMalformed},
+		{name: "number", data: `42`, wantErr: ErrMalformed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got []string
+			err := elements([]byte(tt.data), func(elem []byte) error {
+				got = append(got, string(elem))
+				return nil
+			})
+			if !errors.Is(err, tt.wantErr) || (tt.wantErr == nil && err != nil) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if err == nil && fmt.Sprint(got) != fmt.Sprint(tt.want) {
+				t.Errorf("elements = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // referenceMembers decodes the object data with encoding/json token by token, as the parser did before it
 // skipped values, and returns its members in order with ErrMalformed for a repeated name.
 func referenceMembers(data []byte) ([][2]string, error) {

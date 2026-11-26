@@ -12,12 +12,15 @@ import (
 // A byte order mark at the start is skipped. The reply must be one JSON object with a top-level usage block
 // holding both the input and the output count of the family: input_tokens and output_tokens (Anthropic,
 // Responses) or prompt_tokens and completion_tokens (chat completions). Other counts are optional and absent
-// or null ones are zero.
+// or null ones are zero. For [OpenAIResponses], a present non-null status member must be terminal (completed,
+// incomplete, failed or cancelled); any other string status (in_progress, queued, empty or unknown) fails
+// closed with [ErrTruncated] even when usage is null or absent, and a non-string status is [ErrMalformed]. A
+// body without status, or with a null status, is read as complete.
 //
 // Errors: [ErrInvalidLimits], a [*LimitError] matching [ErrTooLarge], [ErrMalformed], [ErrNoUsage],
-// [ErrOutOfRange], or the reader's error as an opaque cause with bounded text, which [errors.Is] matches and
-// [errors.As] does not unwrap. Only an error that is [io.EOF] itself ends the reply. On error the [Usage] is
-// zero.
+// [ErrOutOfRange], [ErrTruncated], or the reader's error as an opaque cause with bounded text, which
+// [errors.Is] matches and [errors.As] does not unwrap. Only an error that is [io.EOF] itself ends the reply.
+// On error the [Usage] is zero.
 func ParseJSON(f Family, r io.Reader, lim Limits) (Usage, error) {
 	if err := lim.check(f, false); err != nil {
 		return Usage{}, err
@@ -34,13 +37,7 @@ func ParseJSON(f Family, r io.Reader, lim Limits) (Usage, error) {
 	if !validJSON(data) {
 		return Usage{}, ErrMalformed
 	}
-	var block []byte
-	err = members(data, func(name, value []byte) error {
-		if string(name) == nameUsage {
-			block = value
-		}
-		return nil
-	})
+	block, err := topUsageMember(data, f == OpenAIResponses)
 	if err != nil {
 		return Usage{}, err
 	}
@@ -90,8 +87,11 @@ func (b *boundedReader) over() bool { return b.n > b.max }
 
 // Names the parser matches in more than one place.
 const (
-	nameUsage = "usage"
-	typeError = "error"
+	nameUsage        = "usage"
+	nameStatus       = "status"
+	nameInputTokens  = "input_tokens"
+	nameOutputTokens = "output_tokens"
+	typeError        = "error"
 )
 
 // eventFields are the members of an event that the parser reads, raw, nil when absent.
@@ -134,17 +134,47 @@ func decodeEvent(data []byte, withType bool) (eventFields, error) {
 	return ev, err
 }
 
-// usageMember returns the raw usage member of the raw object v, nil when v or the member is absent or null. A
-// v that is not an object or null is ErrMalformed.
-func usageMember(v []byte) ([]byte, error) {
-	var block []byte
-	err := object(v, func(name, value []byte) error {
-		if string(name) == nameUsage {
+// isTerminalResponseStatus reports whether s is a terminal OpenAI Responses API status.
+func isTerminalResponseStatus(s []byte) bool {
+	switch string(s) {
+	case "completed", "incomplete", "failed", "cancelled":
+		return true
+	}
+	return false
+}
+
+// topUsageMember returns the raw usage member of the raw JSON object v, nil when absent. A v that is not an
+// object is ErrMalformed. When checkStatus is true, a present non-null status member must be a terminal
+// Responses status; another string is ErrTruncated and a non-string is ErrMalformed.
+func topUsageMember(v []byte, checkStatus bool) ([]byte, error) {
+	var (
+		block     []byte
+		status    []byte
+		statusSet bool
+	)
+	err := members(v, func(name, value []byte) error {
+		switch string(name) {
+		case nameUsage:
 			block = value
+		case nameStatus:
+			if !checkStatus || isNull(value) {
+				return nil
+			}
+			s, err := str(value)
+			if err != nil {
+				return err
+			}
+			status, statusSet = s, true
 		}
 		return nil
 	})
-	return block, err
+	if err != nil {
+		return nil, err
+	}
+	if statusSet && !isTerminalResponseStatus(status) {
+		return nil, ErrTruncated
+	}
+	return block, nil
 }
 
 // readError is a reader's error kept as the cause of a result. It has no Unwrap method, so errors.As never

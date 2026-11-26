@@ -96,6 +96,41 @@ func object(value []byte, fn func(name, value []byte) error) error {
 	return members(value, fn)
 }
 
+// elements calls fn with the raw value of each element of the array value, in order, or does nothing when
+// value is null. Any value but an array or null is ErrMalformed. fn returning an error stops the walk with
+// that error. value must be valid JSON.
+func elements(value []byte, fn func(elem []byte) error) error {
+	if isNull(value) {
+		return nil
+	}
+	i := skipSpace(value, 0)
+	if i >= len(value) || value[i] != '[' {
+		return ErrMalformed
+	}
+	i = skipSpace(value, i+1)
+	if i < len(value) && value[i] == ']' {
+		return nil
+	}
+	for i < len(value) {
+		vend := skipValue(value, i)
+		if vend <= i {
+			return ErrMalformed
+		}
+		if err := fn(value[i:vend]); err != nil {
+			return err
+		}
+		i = skipSpace(value, vend)
+		if i < len(value) && value[i] == ']' {
+			return nil
+		}
+		if i >= len(value) || value[i] != ',' {
+			return ErrMalformed
+		}
+		i = skipSpace(value, i+1)
+	}
+	return ErrMalformed
+}
+
 // isNull reports whether the raw value is null.
 func isNull(value []byte) bool { return string(value) == "null" }
 

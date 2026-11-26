@@ -83,6 +83,132 @@ func ExampleParseJSON_responses() {
 	// family=openai-responses prompt=5000 uncached=500 read=3000 write=1500 total=5080
 }
 
+func ExampleParseJSON_responsesInProgress() {
+	const reply = `{
+		"id": "resp_02",
+		"object": "response",
+		"status": "in_progress",
+		"usage": {"input_tokens": 500, "output_tokens": 40, "total_tokens": 540}
+	}`
+	lim := modelusage.Limits{MaxBytes: 1 << 20, MaxTokens: 1 << 30}
+	_, err := modelusage.ParseJSON(modelusage.OpenAIResponses, strings.NewReader(reply), lim)
+	fmt.Printf("truncated=%v\n", errors.Is(err, modelusage.ErrTruncated))
+	// Output:
+	// truncated=true
+}
+
+func ExampleParseJSON_totalOutOfRange() {
+	const reply = `{
+		"id": "chatcmpl-02",
+		"object": "chat.completion",
+		"usage": {"prompt_tokens": 90, "completion_tokens": 20, "total_tokens": 100}
+	}`
+	lim := modelusage.Limits{MaxBytes: 1 << 20, MaxTokens: 1 << 30}
+	_, err := modelusage.ParseJSON(modelusage.OpenAIChat, strings.NewReader(reply), lim)
+	fmt.Printf("out_of_range=%v\n", errors.Is(err, modelusage.ErrOutOfRange))
+	// Output:
+	// out_of_range=true
+}
+
+func ExampleParseJSON_anthropicCompaction() {
+	const reply = `{
+		"id": "msg_02",
+		"type": "message",
+		"role": "assistant",
+		"usage": {
+			"input_tokens": 23000,
+			"output_tokens": 1000,
+			"iterations": [
+				{"type": "compaction", "input_tokens": 180000, "output_tokens": 3500},
+				{"type": "message", "input_tokens": 23000, "output_tokens": 1000}
+			]
+		}
+	}`
+	lim := modelusage.Limits{MaxBytes: 1 << 20, MaxTokens: 1 << 30}
+	u, err := modelusage.ParseJSON(modelusage.Anthropic, strings.NewReader(reply), lim)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Printf("compaction_in=%d compaction_out=%d total_in=%d total_out=%d total=%d\n",
+		u.CompactionInputTokens, u.CompactionOutputTokens,
+		u.TotalInputTokens(), u.TotalOutputTokens(), u.TotalTokens())
+	// Output:
+	// compaction_in=180000 compaction_out=3500 total_in=203000 total_out=4500 total=207500
+}
+
+func ExampleParseJSON_anthropicAdvisor() {
+	const reply = `{
+		"id": "msg_03",
+		"type": "message",
+		"role": "assistant",
+		"usage": {
+			"input_tokens": 1760,
+			"cache_read_input_tokens": 412,
+			"output_tokens": 531,
+			"iterations": [
+				{"type": "message", "input_tokens": 1760, "cache_read_input_tokens": 412, "output_tokens": 531},
+				{"type": "advisor_message", "input_tokens": 823, "output_tokens": 1612}
+			]
+		}
+	}`
+	lim := modelusage.Limits{MaxBytes: 1 << 20, MaxTokens: 1 << 30}
+	u, err := modelusage.ParseJSON(modelusage.Anthropic, strings.NewReader(reply), lim)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Printf("advisor_in=%d advisor_out=%d total_in=%d total_out=%d total=%d\n",
+		u.AdvisorInputTokens, u.AdvisorOutputTokens,
+		u.TotalInputTokens(), u.TotalOutputTokens(), u.TotalTokens())
+	// Output:
+	// advisor_in=823 advisor_out=1612 total_in=2995 total_out=2143 total=5138
+}
+
+func ExampleParseJSON_reportedTotalTokens() {
+	const reply = `{
+		"id": "chatcmpl-03",
+		"object": "chat.completion",
+		"usage": {"prompt_tokens": 90, "completion_tokens": 20, "total_tokens": 135}
+	}`
+	lim := modelusage.Limits{MaxBytes: 1 << 20, MaxTokens: 1 << 30}
+	u, err := modelusage.ParseJSON(modelusage.OpenAIChat, strings.NewReader(reply), lim)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	parts := u.TotalInputTokens() + u.TotalOutputTokens()
+	fmt.Printf("parts=%d reported=%d total=%d\n", parts, u.ReportedTotalTokens, u.TotalTokens())
+	// Output:
+	// parts=110 reported=135 total=135
+}
+
+func ExampleParseJSON_anthropicUnclassifiedIterations() {
+	const reply = `{
+		"id": "msg_04",
+		"type": "message",
+		"role": "assistant",
+		"usage": {
+			"input_tokens": 100,
+			"output_tokens": 40,
+			"iterations": [
+				{"type": "advisor_message_v2", "input_tokens": 500, "output_tokens": 200}
+			]
+		}
+	}`
+	lim := modelusage.Limits{MaxBytes: 1 << 20, MaxTokens: 1 << 30}
+	u, err := modelusage.ParseJSON(modelusage.Anthropic, strings.NewReader(reply), lim)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	budgetTotal := u.TotalTokens() + u.UnclassifiedIterationInputTokens + u.UnclassifiedIterationOutputTokens
+	fmt.Printf("total=%d unclassified_in=%d unclassified_out=%d budget=%d\n",
+		u.TotalTokens(), u.UnclassifiedIterationInputTokens, u.UnclassifiedIterationOutputTokens, budgetTotal)
+	// Output:
+	// total=140 unclassified_in=500 unclassified_out=200 budget=840
+}
+
 func ExampleParseStream() {
 	const stream = "" +
 		"event: message_start\n" +
