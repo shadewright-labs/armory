@@ -1,6 +1,11 @@
 name: PR title
 
-# Use the base-branch workflow so the pull request cannot change its own title check.
+# Squash merges use the pull request title as the commit message on main, so the title must follow Conventional
+# Commits (see AGENTS.md, "Commits"). The scopes are the packages and the areas around them; keep the list in
+# step with AGENTS.md and the issue templates.
+# pull_request_target runs this file from the base branch, so a pull request cannot weaken its own check.
+# That is safe only because the job never checks out or runs pull request code and has read-only
+# permissions: keep it that way.
 on:
   pull_request_target: # zizmor: ignore[dangerous-triggers] read-only token, no checkout, never runs pull request code
     types: [opened, edited, synchronize, reopened]
@@ -29,13 +34,17 @@ jobs:
             chore
             revert
           scopes: |
+            modelusage
+            githost
             redact
-            hygiene
             audit
-            docs
+            hygiene
+            adr
             ci
+            docs
             deps
+            release
           requireScope: false
           subjectPattern: ^[a-z].*[^.]$
           subjectPatternError: |
-            The summary "{subject}" must start with a lower-case letter and omit the final full stop.
+            The summary "{subject}" must start with a lower-case letter and must not end with a full stop.
