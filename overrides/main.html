@@ -1,5 +1,11 @@
 {% extends "base.html" %}
 
+{#- Announcement bar: pre-v1.0.0 status notice, on every page. -#}
+{% block announce %}
+  <strong>Early:</strong> Armory has no release yet, and its API can change until v1.0.0. Only <code>modelusage</code> is available; redaction (next), hygiene checks and audit chains are planned.
+  <a href="{{ config.site_url }}#packages">Packages</a>
+{% endblock %}
+
 {#- Link previews: Open Graph and Twitter tags with the local brand image (no third-party social cards service). -#}
 {% block extrahead %}
   {% set am_title = page.meta.title if page.meta and page.meta.title else (page.title | striptags if page and page.title and not page.is_homepage else config.site_name) %}

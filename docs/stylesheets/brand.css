@@ -1,6 +1,6 @@
 /*
  * Armory dark theme for the docs site using the Shadewright Labs palette.
- * Text and code use system font stacks (Google Fonts is off via `font = false` in
+ * Header title, text and code use system font stacks (Google Fonts is off via `font = false` in
  * zensical.toml) so the site makes no third-party requests.
  *
  * One scheme: slate (dark only). Every text pair meets WCAG 2.2 AA (4.5:1), computed on sRGB relative
@@ -13,6 +13,8 @@
  *   code string #7fd6b4 on box #14111c: 10.81:1
  *   code number #f0b86a on box #14111c: 10.45:1
  *   primary button text #08060e on accent #a879ff: 6.56:1 (on hover #c7a6ff: 9.90:1)
+ *   secondary button text #a879ff on box #14111c: 6.07:1 (on hover #08060e on #c7a6ff: 9.90:1)
+ *   announcement bar text #ffe2bd on #2e200c: 12.70:1 (link #ffffff on #2e200c: 15.81:1)
  */
 
 :root {
@@ -27,6 +29,7 @@
   --am-accent-hover: #c7a6ff;
   --am-string: #7fd6b4;
   --am-number: #f0b86a;
+  --am-heading-font: Georgia, "Iowan Old Style", "Times New Roman", serif;
   --md-text-font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --md-code-font: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
@@ -62,9 +65,19 @@
   background-color: var(--am-box);
   box-shadow: 0 1px 0 0 var(--am-line);
 }
+.md-header__button.md-logo {
+  padding: 0.35rem;
+}
+.md-header__button.md-logo img {
+  height: 1.75rem;
+  width: auto;
+  min-width: 16px;
+  display: block;
+}
 .md-header__title {
   color: var(--am-bone);
-  font-weight: 650;
+  font-family: var(--am-heading-font);
+  font-weight: 400;
   letter-spacing: 0.02em;
 }
 .md-tabs {
@@ -162,13 +175,94 @@
   color: var(--am-ground);
 }
 
+/* Home page hero: flat ground field with clear space around the full horizontal lockup. */
+.arm-hero {
+  margin: 0.5rem 0 2.5rem;
+  padding: 2.75rem 1.5rem 2.25rem;
+  text-align: center;
+  background-color: var(--am-ground);
+  border-radius: 0.5rem;
+  color: var(--am-bone);
+}
+.arm-hero img {
+  display: block;
+  margin: 0 auto;
+  width: min(520px, 100%);
+  min-width: 120px;
+  height: auto;
+}
+.md-typeset .arm-hero .arm-lore {
+  max-width: 34rem;
+  margin: 1.5rem auto 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-style: italic;
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--am-secondary);
+}
+.md-typeset .arm-hero .arm-lore a {
+  white-space: nowrap;
+}
+.md-typeset .arm-hero .arm-tagline {
+  max-width: 38rem;
+  margin: 1.75rem auto 1.85rem;
+  font-size: 1.05rem;
+  color: var(--am-secondary);
+}
+.md-typeset .arm-hero .md-button {
+  color: var(--am-accent);
+}
+.md-typeset .arm-hero .md-button--primary {
+  color: var(--am-ground);
+}
+.md-typeset .arm-hero .md-button:not(.md-button--primary) {
+  background-color: var(--am-box);
+}
+.md-typeset .arm-hero .md-button:hover,
+.md-typeset .arm-hero .md-button:focus,
+.md-typeset .arm-hero .md-button:not(.md-button--primary):hover,
+.md-typeset .arm-hero .md-button:not(.md-button--primary):focus {
+  background-color: var(--am-accent-hover);
+  border-color: var(--am-accent-hover);
+  color: var(--am-ground);
+}
+.arm-hero .md-button {
+  margin: 0.25rem 0.3rem;
+}
+.md-typeset h1.arm-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Announcement bar (overrides/main.html). */
+.md-banner {
+  background-color: #2e200c;
+  color: #ffe2bd;
+}
+.md-banner a {
+  color: #ffffff;
+  text-decoration: underline;
+}
+.md-banner .md-typeset code {
+  background-color: transparent;
+  color: #ffe2bd;
+  box-shadow: none;
+  padding: 0;
+}
+
 /* Keyboard focus and reduced motion. */
 :focus-visible {
   outline: 2px solid var(--am-accent);
   outline-offset: 2px;
 }
 .md-header :focus-visible,
-.md-footer :focus-visible {
+.md-footer :focus-visible,
+.md-banner :focus-visible {
   outline-color: var(--am-bone);
 }
 @media (prefers-reduced-motion: reduce) {
@@ -179,6 +273,19 @@
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* Narrow screens. */
+@media (max-width: 44.9375em) {
+  .arm-hero {
+    padding: 1.75rem 1rem 1.5rem;
+  }
+  .arm-hero img {
+    width: 100%;
+  }
+  .md-header__button.md-logo img {
+    height: 1.5rem;
   }
 }
 
