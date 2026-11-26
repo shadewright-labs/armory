@@ -11,8 +11,8 @@ Every Shadewright Labs product may import Armory, and Armory depends on no produ
 Four other invariants in [AGENTS.md](https://github.com/shadewright-labs/armory/blob/main/AGENTS.md) apply to every package; weakening any of them requires an ADR in [docs/adr/](adr/README.md) first:
 
 - Standard library first: any third-party dependency needs a reason in the pull request, an Apache-2.0 compatible licence (no GPL, AGPL or LGPL) and passes dependency review.
-- No credentials and no secrets in output: Armory reads no environment secrets or unpassed files, does not log and returns fixed error text that never quotes input, headers, tokens or URLs with credentials.
-- Bounded and fuzzed parsers: code that reads external input enforces caller-set byte, line and count limits, returns an error instead of panicking on bad input and ships a fuzz target with a seed corpus.
+- No credentials and no secrets in output: Armory reads no environment secrets and no file it was not passed, does not log, and does not quote external input in error text.
+- Bounded and fuzzed parsers: code that reads external input works within limits the caller sets, returns an error instead of panicking on bad input, and ships with fuzz targets and a seed corpus.
 - Semantic versioning: before v1.0.0 a minor version may break the API; from v1.0.0 a breaking change uses a new major version and `/v2` module path.
 
 ## Packages

@@ -19,13 +19,13 @@ In all three families, `Usage.ReasoningTokens` is part of `Usage.OutputTokens`. 
 
 ## Limits
 
-Every field of `Limits` must be positive; an out-of-range limit or unknown `Family` returns `ErrInvalidLimits`:
+The caller sets the bounds in a `Limits` value. A limit a call uses must be positive, and an out-of-range limit or an unknown `Family` gives `ErrInvalidLimits`:
 
-- `Limits.MaxBytes` (`int64`, below `math.MaxInt64`): total bytes read. Exceeding it returns `*LimitError` matching `ErrTooLarge`.
-- `Limits.MaxLineBytes` (`int`, at most `math.MaxInt-5`, `ParseStream` only): one line without its line ending, and the joined `data` of one event. Exceeding it returns `*LimitError` matching `ErrLineTooLong`.
-- `Limits.MaxTokens` (`int64`, at most `MaxTokensCeiling`, `1 << 60`): every count, `TotalInputTokens` and `TotalTokens`. Negative counts, counts above `MaxTokens` or breakdowns exceeding their parent return `ErrOutOfRange`.
+- `Limits.MaxBytes`: the total bytes read. Past it the error is a `*LimitError` that matches `ErrTooLarge`.
+- `Limits.MaxLineBytes` (`ParseStream` only): one line without its line ending, and the joined `data` of one event. Past it the error is a `*LimitError` that matches `ErrLineTooLong`.
+- `Limits.MaxTokens` (at most `MaxTokensCeiling`): every count and the totals. A negative count or one above `MaxTokens` is `ErrOutOfRange`.
 
-Non-integer counts, duplicate keys and bad syntax return `ErrMalformed`. Missing usage or missing input/output counts return `ErrNoUsage`. Error text is fixed and bounded and never quotes the reply.
+Bad syntax and a count that is not an integer are `ErrMalformed`. A complete JSON reply with no usage, or without its input or output count, is `ErrNoUsage`. Parser error text never quotes the reply. In a stream, any of these errors can arrive inside a `*PartialError` or `*TrailingError`, as the next section explains. The package comment in the source states every rule exactly.
 
 ## Stream result classes
 
@@ -35,4 +35,4 @@ Non-integer counts, duplicate keys and bad syntax return `ErrMalformed`. Missing
 - Partial (`*PartialError`): at least one usage block with a count was accepted before the stream ended or failed. `Usage` is the usage so far, not final. Unless `errors.Is(err, ErrInconsistent)`, `TotalInputTokens` and `TotalTokens` are lower bounds for that `Limits` value; `UncachedInputTokens` is not.
 - None (any other error, zero `Usage`): no usage block with a count was accepted.
 
-Both `*TrailingError` and `*PartialError` unwrap to their cause (`ErrTruncated`, `ErrMalformed`, `ErrInconsistent`, `ErrOutOfRange`, `ErrNoUsage`, `ErrTooLarge`, `ErrLineTooLong` or the reader's error via `errors.Is`).
+Both types unwrap to their cause, so `errors.Is` finds the sentinel error inside.
