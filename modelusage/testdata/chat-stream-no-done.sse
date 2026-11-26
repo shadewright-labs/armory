@@ -1,0 +1,10 @@
+data: {"id":"chatcmpl-test0002","object":"chat.completion.chunk","created":1700000000,"model":"gpt-example","system_fingerprint":"fp_test","choices":[{"index":0,"delta":{"role":"assistant","content":"","refusal":null},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-test0002","object":"chat.completion.chunk","created":1700000000,"model":"gpt-example","system_fingerprint":"fp_test","choices":[{"index":0,"delta":{"content":"The pod is"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-test0002","object":"chat.completion.chunk","created":1700000000,"model":"gpt-example","system_fingerprint":"fp_test","choices":[{"index":0,"delta":{"content":" out of memory."},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-test0002","object":"chat.completion.chunk","created":1700000000,"model":"gpt-example","system_fingerprint":"fp_test","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}],"usage":null}
+
+data: {"id":"chatcmpl-test0002","object":"chat.completion.chunk","created":1700000000,"model":"gpt-example","system_fingerprint":"fp_test","choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":42,"total_tokens":1242,"prompt_tokens_details":{"cached_tokens":1024,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}
+

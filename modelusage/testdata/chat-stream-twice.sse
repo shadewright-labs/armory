@@ -1,0 +1,8 @@
+data: {"id":"chatcmpl-test0002","object":"chat.completion.chunk","created":1700000000,"model":"gpt-example","system_fingerprint":"fp_test","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}],"usage":{"prompt_tokens":300,"completion_tokens":0,"total_tokens":300}}
+
+data: {"id":"chatcmpl-test0002","object":"chat.completion.chunk","created":1700000000,"model":"gpt-example","system_fingerprint":"fp_test","choices":[{"index":0,"delta":{"content":"The pod"},"logprobs":null,"finish_reason":null}],"usage":{"prompt_tokens":300,"completion_tokens":2,"total_tokens":302}}
+
+data: {"id":"chatcmpl-test0002","object":"chat.completion.chunk","created":1700000000,"model":"gpt-example","system_fingerprint":"fp_test","choices":[{"index":0,"delta":{"content":" is out of memory."},"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens":300,"completion_tokens":7,"total_tokens":307}}
+
+data: [DONE]
+
