@@ -76,6 +76,15 @@ type harness struct {
 
 func newHarness(t *testing.T, s *server, mod func(*Config)) *harness {
 	t.Helper()
+	h, err := tryHarness(s, mod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// tryHarness is newHarness for a config New may refuse.
+func tryHarness(s *server, mod func(*Config)) (*harness, error) {
 	h := &harness{s: s}
 	cfg := Config{
 		Host: s.host(),
@@ -111,10 +120,10 @@ func newHarness(t *testing.T, s *server, mod func(*Config)) *harness {
 	}
 	c, err := New(cfg)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	h.c = c
-	return h
+	return h, nil
 }
 
 func get() Request {
@@ -179,6 +188,10 @@ func TestNewRefusesConfig(t *testing.T) {
 		{"no credential", Config{Host: apiHost}},
 		{"authorization header", Config{Host: apiHost, Credential: cred,
 			Header: http.Header{"authorization": {"x"}}}},
+		{"idempotency key header", Config{Host: apiHost, Credential: cred,
+			Header: http.Header{"idempotency-key": {"x"}}}},
+		{"x-idempotency key header", Config{Host: apiHost, Credential: cred,
+			Header: http.Header{"X-Idempotency-Key": {"x"}}}},
 	}
 	for _, c := range cases {
 		if _, err := New(c.cfg); !errors.Is(err, githost.ErrInvalidConfig) {
@@ -457,6 +470,8 @@ func TestRetryAfterAndRateLimits(t *testing.T) {
 			[]time.Duration{7 * time.Second}, 0, 2},
 		{"403 secondary", 403, nil, `{"message":"You have exceeded a secondary rate limit ` + bodyCanary + `"}`,
 			nil, time.Minute, 1},
+		{"403 unusable retry-after, quota reset", 403, map[string]string{hRetry: "soon",
+			"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset}, "", []time.Duration{7 * time.Second}, 0, 2},
 		{"503 retry-after", 503, map[string]string{hRetry: "2"}, bodyCanary, []time.Duration{2 * time.Second}, 0, 2},
 	}
 	for _, c := range cases {

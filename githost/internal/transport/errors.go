@@ -115,8 +115,9 @@ func credentialError(op string, err error) error {
 	case errors.Is(err, context.DeadlineExceeded):
 		return &githost.RetryableError{Err: fmt.Errorf("githost: %s: %s: %w", op, msg, context.DeadlineExceeded)}
 	case errors.Is(err, githost.ErrRetryable):
+		// The same cap as a delay the host asks for; backoff applies the caller's deadline to both.
 		after, _ := askedDelay(err)
-		return &githost.RetryableError{RetryAfter: after, Err: fixed(op, msg)}
+		return &githost.RetryableError{RetryAfter: min(after, maxDelay), Err: fixed(op, msg)}
 	}
 	for _, kind := range []error{githost.ErrNotFound, githost.ErrForbidden, githost.ErrUnauthorized} {
 		if errors.Is(err, kind) {

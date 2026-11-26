@@ -15,22 +15,39 @@
 //     a conditional request;
 //   - reads every 2xx body with a bound the caller sets, refuses a declared length over it before
 //     reading, and returns githost.ErrTooLarge past it; a 2xx answer to a write whose body cannot be
-//     used is githost.ErrUnusableReceipt and is never sent again;
+//     used is githost.ErrUnusableReceipt and is never sent again, and also githost.ErrOutcomeUnknown
+//     when an earlier attempt of the call may have written as well;
 //   - retries reads, and writes marked idempotent, on network errors, timeouts, 408, 429, 5xx and rate
 //     limits, with exponential backoff and jitter, Retry-After and rate limit reset delays, and the
 //     context honoured during every wait; a write not marked idempotent is sent once;
 //   - once an attempt of a write may have reached the host without an answer that says it did not
-//     write, returns every later failure of the call as githost.ErrOutcomeUnknown next to its own kind;
+//     write, returns every later failure of the call as githost.ErrOutcomeUnknown next to its own kind,
+//     an unusable receipt included;
 //   - calls the write check before every attempt of a write, and sends nothing more when it refuses;
 //   - builds error text from fixed words, the operation label, the status code and a valid refusal class
 //     only, never from a body, URL, header, token or a wrapped error of another package or a callback;
 //   - reports one payload-free Event per attempt to the Observer, after the attempt is over.
 //
-// An attempt is one call of http.Client.Do. Below it, Go's HTTP/1 transport may send a request again on
-// a new connection when a reused one fails; for a request with a body it does so only when the body can
-// be rewound, so Do clears GetBody on every request with a body, and Go then sends it again only when
-// nothing of it was written. Each write check is therefore followed by at most one write that reaches
-// the host.
+// An attempt is one call of http.Client.Do, and each write check is followed by at most one write that
+// the host may have read. Below Do, Go's transport sends a request again on its own only in these cases
+// (net/http: Transport.roundTrip, persistConn.shouldRetryRequest, Request.isReplayable; and the HTTP/2
+// shouldRetryRequest and canRetryError):
+//
+//   - HTTP/1, on a reused connection, when not one byte of the request was written. A request with a
+//     body is not sent again even then, because Do clears GetBody; a bodiless one is, and the host never
+//     saw the first.
+//   - HTTP/1, on a reused connection that failed or closed before the first byte of the answer, when the
+//     request is replayable: no body (or a GetBody) and the method GET, HEAD, OPTIONS or TRACE, or an
+//     Idempotency-Key or X-Idempotency-Key header. PUT is not replayable by method. Of the writes Do
+//     sends, only a bodiless one with such a header would qualify, and the host may have read the first:
+//     New refuses both headers in Config.Header, and Request has no header field.
+//   - HTTP/2, when the server answers a stream with GOAWAY naming a lower last stream, or REFUSED_STREAM,
+//     both of which say the server did not process it, or the connection was unusable before the
+//     request went out. A request with a body and no GetBody is sent again only in the last case.
+//
+// So every resend below the check carries bytes the host did not act on, by its own protocol statement.
+// The same check decision covers them: the request is identical, token included. Keep-alive is not
+// turned off for writes: it would not change these cases, and the first case needs no new connection.
 //
 // What sees the request after the token is set: the http.Client this package builds (its redirect
 // policy only returns the last answer and never sees a token-bearing request of its own), and
@@ -127,14 +144,14 @@ type Config struct {
 	Host string
 	// Repo is the repository tokens are asked for.
 	Repo githost.RepoRef
-	// Credential returns a token for each attempt. Required.
+	// Credential returns a token for each attempt, retries included. Required.
 	Credential githost.Credential
 	// WriteCheck is called before each attempt of a write. Nil allows no write.
 	WriteCheck WriteCheck
 	// Observer, when set, gets one Event per attempt.
 	Observer Observer
-	// Header holds fixed headers sent with every request, such as an API version. Authorization is
-	// refused.
+	// Header holds fixed headers sent with every request, such as an API version. Authorization,
+	// Idempotency-Key and X-Idempotency-Key are refused.
 	Header http.Header
 	// UserAgent is sent with every request; empty means "armory-githost".
 	UserAgent string
@@ -216,7 +233,10 @@ func New(cfg Config) (*Client, error) {
 		return nil, &githost.Error{Op: opNew, Kind: githost.ErrInvalidConfig}
 	}
 	for k := range cfg.Header {
-		if http.CanonicalHeaderKey(k) == "Authorization" {
+		switch http.CanonicalHeaderKey(k) {
+		case "Authorization", "Idempotency-Key", "X-Idempotency-Key":
+			// The token is set per attempt only; an idempotency key would let Go's transport resend a
+			// bodiless write the host may have read, below the write check.
 			return nil, &githost.Error{Op: opNew, Kind: githost.ErrInvalidConfig}
 		}
 	}
@@ -281,9 +301,19 @@ func sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// dialer opens the connections of the default HTTP transport.
+var dialer = net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+
 // newHTTPClient never follows a redirect (Go keeps the Authorization header on some), requires TLS 1.2
 // or later, bounds connection setup, the wait for headers, the header size and each attempt, and checks
 // the origin again below the client, in case anything below Do builds a request of its own.
+//
+// The default transport keeps Go's proxy settings from the environment (HTTPS_PROXY, NO_PROXY), so a
+// client works behind an egress proxy. A proxy then learns the pinned host and port, the time and size
+// of each exchange, and, when its URL holds a user, gets that user's Proxy-Authorization on each CONNECT.
+// It never gets the Authorization header: every request is https, which Go sends through a CONNECT
+// tunnel, and the header travels inside TLS to the host, whose certificate is verified as without a
+// proxy. Who may set the environment of the process is therefore who may choose a proxy.
 func newHTTPClient(rt http.RoundTripper, host string, attempt time.Duration) *http.Client {
 	if rt == nil {
 		t := http.DefaultTransport.(*http.Transport).Clone()
@@ -291,7 +321,8 @@ func newHTTPClient(rt http.RoundTripper, host string, attempt time.Duration) *ht
 		t.TLSHandshakeTimeout = 10 * time.Second
 		t.ResponseHeaderTimeout = 30 * time.Second
 		t.MaxResponseHeaderBytes = maxHeaderBytes
-		t.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+		t.DialContext = dialer.DialContext
+		t.Proxy = http.ProxyFromEnvironment
 		rt = t
 	}
 	return &http.Client{
@@ -349,7 +380,9 @@ func (c *Client) Do(ctx context.Context, r Request) (Response, error) {
 			// An answer such as 409 or 422 after an attempt whose answer was lost may be about that attempt.
 			return Response{}, outcomeUnknown(r.Op, StatusError(r.Op, resp.Status))
 		case errors.Is(err, githost.ErrUnusableReceipt):
-			return Response{}, err
+			// This attempt was accepted. When an earlier one may have written too, the host may hold two
+			// writes, so the caller learns both.
+			return Response{}, finalError(r.Op, err, mayHaveWritten)
 		case !errors.Is(err, githost.ErrRetryable) || attempt >= c.attempts || (write && !r.Idempotent):
 			return Response{}, finalError(r.Op, err, mayHaveWritten)
 		}

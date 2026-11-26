@@ -239,3 +239,152 @@ func TestRefusalClass(t *testing.T) {
 		})
 	}
 }
+
+// TestUnusableReceiptAfterLostAttempt: a 2xx with an unusable body after an earlier attempt whose answer
+// was lost says both things the caller knows: this attempt was accepted, and whether the earlier one was
+// applied too is unknown. It is not retryable and is not sent again.
+func TestUnusableReceiptAfterLostAttempt(t *testing.T) {
+	s := newServer(t, func(w http.ResponseWriter, _ *http.Request, n int) {
+		if n == 1 {
+			dropConn(w)
+			return
+		}
+		w.Header().Set("Content-Length", "50")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"sha":"`)
+	})
+	h := newHarness(t, s, nil)
+	_, err := h.c.Do(t.Context(), post(true))
+	if !errors.Is(err, githost.ErrUnusableReceipt) || !errors.Is(err, githost.ErrOutcomeUnknown) {
+		t.Fatalf("Do = %v, want ErrUnusableReceipt and ErrOutcomeUnknown", err)
+	}
+	var he *githost.Error
+	if !errors.As(err, &he) || he.Status != http.StatusCreated {
+		t.Errorf("Do = %v, want status 201 in the chain", err)
+	}
+	if errors.Is(err, githost.ErrRetryable) {
+		t.Errorf("Do = %v is retryable", err)
+	}
+	assertScrubbed(t, s, err)
+	if n := s.hits.Load(); n != 2 {
+		t.Errorf("server got %d requests, want 2", n)
+	}
+}
+
+// TestTokenAskedPerAttempt: every attempt asks the credential again and sends the token it returned
+// then, so a token refreshed between attempts is the one used.
+func TestTokenAskedPerAttempt(t *testing.T) {
+	s := newServer(t, func(w http.ResponseWriter, _ *http.Request, n int) {
+		if n == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		okBody(w)
+	})
+	var calls atomic.Int32
+	h := newHarness(t, s, func(cfg *Config) {
+		cfg.Credential = githost.CredentialFunc(func(context.Context, githost.Scope) (githost.Token, error) {
+			n := calls.Add(1)
+			return githost.NewToken(githost.Bearer, tokenCanary+"-"+strconv.Itoa(int(n)), time.Time{}), nil
+		})
+	})
+	for _, r := range []Request{get(), post(true)} {
+		calls.Store(0)
+		s.hits.Store(0)
+		s.mu.Lock()
+		s.auth = nil
+		s.mu.Unlock()
+		if _, err := h.c.Do(t.Context(), r); err != nil {
+			t.Fatalf("%s: %v", r.Method, err)
+		}
+		want := []string{"Bearer " + tokenCanary + "-1", "Bearer " + tokenCanary + "-2"}
+		s.mu.Lock()
+		got := s.auth
+		s.mu.Unlock()
+		if calls.Load() != 2 || strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("%s: credential asked %d times, sent %q; want 2 and %q", r.Method, calls.Load(), got, want)
+		}
+	}
+}
+
+// TestCredentialFailsAfterLostWrite: a credential that fails on a retry after an attempt that may have
+// written gives an error that says the outcome is unknown, whatever the credential's class.
+func TestCredentialFailsAfterLostWrite(t *testing.T) {
+	for name, credErr := range map[string]error{
+		"retryable":    &githost.RetryableError{RetryAfter: time.Hour, Err: errors.New(tokenCanary)},
+		"unauthorized": fmt.Errorf("%s: %w", tokenCanary, githost.ErrUnauthorized),
+		"plain":        errors.New(tokenCanary),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newServer(t, func(w http.ResponseWriter, _ *http.Request, _ int) { dropConn(w) })
+			var calls atomic.Int32
+			h := newHarness(t, s, func(cfg *Config) {
+				cfg.Credential = githost.CredentialFunc(func(context.Context, githost.Scope) (githost.Token, error) {
+					if calls.Add(1) > 1 {
+						return githost.Token{}, credErr
+					}
+					return githost.NewToken(githost.Bearer, tokenCanary, time.Time{}), nil
+				})
+			})
+			_, err := h.c.Do(t.Context(), post(true))
+			if !errors.Is(err, githost.ErrOutcomeUnknown) || errors.Is(err, githost.ErrRetryable) {
+				t.Fatalf("Do = %v, want ErrOutcomeUnknown and not retryable", err)
+			}
+			if calls.Load() != 2 {
+				t.Errorf("credential asked %d times, want 2", calls.Load())
+			}
+			assertScrubbed(t, s, err)
+		})
+	}
+}
+
+// TestCredentialRetryAfterBounded: a delay a credential asks for through RetryableError gets the same
+// one-hour cap and the same deadline rule as a delay the host asks for.
+func TestCredentialRetryAfterBounded(t *testing.T) {
+	cases := []struct {
+		name      string
+		after     time.Duration
+		deadline  time.Duration // zero means none beyond the client's Timeout
+		wantWaits []time.Duration
+		wantAfter time.Duration // the RetryAfter of the returned error; zero means success
+	}{
+		{"capped at an hour", 48 * time.Hour, 0, nil, time.Hour},
+		{"past MaxWait", time.Minute, 0, nil, time.Minute},
+		{"waited in place", 10 * time.Second, 0, []time.Duration{10 * time.Second}, 0},
+		{"past the caller's deadline", 10 * time.Second, time.Second, nil, 10 * time.Second},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newServer(t, func(w http.ResponseWriter, _ *http.Request, _ int) { okBody(w) })
+			var calls atomic.Int32
+			h := newHarness(t, s, func(cfg *Config) {
+				cfg.Credential = githost.CredentialFunc(func(context.Context, githost.Scope) (githost.Token, error) {
+					if calls.Add(1) == 1 {
+						return githost.Token{}, &githost.RetryableError{RetryAfter: c.after, Err: errors.New(tokenCanary)}
+					}
+					return githost.NewToken(githost.Bearer, tokenCanary, time.Time{}), nil
+				})
+			})
+			ctx := t.Context()
+			if c.deadline > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, c.deadline)
+				defer cancel()
+			}
+			_, err := h.c.Do(ctx, get())
+			if c.wantAfter == 0 && err != nil {
+				t.Fatalf("Do = %v, want success", err)
+			}
+			if c.wantAfter != 0 {
+				var re *githost.RetryableError
+				if !errors.As(err, &re) || re.RetryAfter != c.wantAfter {
+					t.Fatalf("Do = %v, want retryable after %s", err, c.wantAfter)
+				}
+				assertScrubbed(t, s, err)
+			}
+			if fmt.Sprint(h.waits) != fmt.Sprint(c.wantWaits) {
+				t.Errorf("waits %v, want %v", h.waits, c.wantWaits)
+			}
+		})
+	}
+}
