@@ -1,0 +1,512 @@
+name: Release provenance
+
+# Runs on every v* tag push. Skips pre-release tags cleanly with a notice because release-please does not
+# create releases for them. For release tags (vX.Y.Z), confirms the tag points at a commit on main
+# (hack/require-on-main.sh), downloads the module zip from https://proxy.golang.org with sum.golang.org
+# forced and GOENV disabled, ties Origin.Hash and Origin.Ref to the checked-out tag commit, attests the zip
+# with actions/attest-build-provenance, verifies the attestation against this workflow's identity and tag
+# ref, attaches the zip and its .sha256 to the draft GitHub release and publishes the release.
+#
+# Permissions are split by job:
+# - fetch has contents: read only and never sees an OIDC token or write permission.
+# - attest has contents: read, id-token: write and attestations: write only, verifies the downloaded zip's
+#   sha256 and h1 dirhash against needs.fetch.outputs, and attests it.
+# - upload has contents: write only, verifies the downloaded zip's sha256 and h1 dirhash against
+#   needs.fetch.outputs, runs no build or signing step, and publishes the draft only after both assets are
+#   uploaded and non-empty so immutable releases stay enabled.
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-provenance-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    name: Fetch and verify module zip
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      skip: ${{ steps.tag.outputs.skip }}
+      zip_sha256: ${{ steps.download.outputs.zip_sha256 }}
+      mod_sum: ${{ steps.download.outputs.mod_sum }}
+    steps:
+      - name: Check release tag
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if printf '%s' "${TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$'; then
+            echo "::notice::Skipping pre-release tag ${TAG}: release-please does not create releases for pre-release tags."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if ! printf '%s' "${TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "tag '${TAG}' is not a valid semver vX.Y.Z tag" >&2
+            exit 1
+          fi
+          echo "skip=false" >> "${GITHUB_OUTPUT}"
+
+      # A release tag must point at a commit on main: the provenance identity only says "this workflow on a v*
+      # tag", so the history of main is fetched for the check below.
+      - name: Clone the code
+        if: steps.tag.outputs.skip != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Require the tag to be on main
+        if: steps.tag.outputs.skip != 'true'
+        run: bash hack/require-on-main.sh HEAD origin/main
+
+      - name: Setup Go
+        if: steps.tag.outputs.skip != 'true'
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false # a release fetch must not read a cache that another run could have written
+
+      - name: Download module zip from proxy and verify against sumdb
+        id: download
+        if: steps.tag.outputs.skip != 'true'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "${TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "tag '${TAG}' is not a valid semver vX.Y.Z tag" >&2
+            exit 1
+          fi
+
+          expected_commit="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          if [ "${expected_commit}" != "${head_commit}" ]; then
+            echo "checked-out HEAD (${head_commit}) does not match refs/tags/${TAG} (${expected_commit})" >&2
+            exit 1
+          fi
+
+          module="github.com/shadewright-labs/armory"
+          workdir="${RUNNER_TEMP}/mod"
+          modcache="${RUNNER_TEMP}/gomodcache"
+          dist="${RUNNER_TEMP}/dist"
+          meta="${RUNNER_TEMP}/download.json"
+          errlog="${RUNNER_TEMP}/download.err"
+          mkdir -p "${workdir}" "${dist}"
+
+          env_json="$(
+            cd "${workdir}"
+            env -u GOVCS \
+              GOENV=off \
+              GOPRIVATE= \
+              GONOSUMDB= \
+              GONOPROXY= \
+              GOINSECURE= \
+              GOFLAGS= \
+              GOPROXY=https://proxy.golang.org \
+              GOSUMDB=sum.golang.org \
+              GOWORK=off \
+              go env -json GOSUMDB GOPROXY GONOSUMDB GOPRIVATE GONOPROXY GOINSECURE GOFLAGS
+          )"
+          if ! jq -e '
+            .GOSUMDB == "sum.golang.org" and
+            .GOPROXY == "https://proxy.golang.org" and
+            .GONOSUMDB == "" and
+            .GOPRIVATE == "" and
+            .GONOPROXY == "" and
+            .GOINSECURE == "" and
+            .GOFLAGS == ""
+          ' <<< "${env_json}" > /dev/null; then
+            echo "unexpected Go module environment: ${env_json}" >&2
+            exit 1
+          fi
+
+          max_attempts=20
+          downloaded=false
+          for attempt in $(seq 1 "${max_attempts}"); do
+            chmod -R u+w "${modcache}" 2>/dev/null || true
+            rm -rf "${modcache}"
+            mkdir -p "${modcache}"
+            rc=0
+            (
+              cd "${workdir}"
+              env -u GOVCS \
+                GOENV=off \
+                GOPRIVATE= \
+                GONOSUMDB= \
+                GONOPROXY= \
+                GOINSECURE= \
+                GOFLAGS= \
+                GOPROXY=https://proxy.golang.org \
+                GOSUMDB=sum.golang.org \
+                GOWORK=off \
+                GOMODCACHE="${modcache}" \
+                go mod download -json "${module}@${TAG}"
+            ) > "${meta}" 2> "${errlog}" || rc=$?
+
+            if [ "${rc}" -eq 0 ] && jq -e '(.Error // "") == ""' "${meta}" > /dev/null 2>&1; then
+              downloaded=true
+              break
+            fi
+
+            err_json="$(jq -r '.Error // empty' "${meta}" 2>/dev/null || true)"
+            err_stderr="$(cat "${errlog}" 2>/dev/null || true)"
+            combined_err="${err_json}"$'\n'"${err_stderr}"
+
+            if printf '%s' "${combined_err}" | grep -Fq 'SECURITY ERROR'; then
+              echo "checksum mismatch (SECURITY ERROR) downloading ${module}@${TAG} from proxy.golang.org; aborting immediately" >&2
+              cat "${meta}" >&2 || true
+              cat "${errlog}" >&2 || true
+              exit 1
+            fi
+
+            if ! printf '%s' "${combined_err}" | grep -Eiq '(not found|404 Not Found|410 Gone|(^|[^0-9])(404|410)([^0-9]|$))'; then
+              echo "non-retryable error downloading ${module}@${TAG} from proxy.golang.org (exit ${rc}):" >&2
+              cat "${meta}" >&2 || true
+              cat "${errlog}" >&2 || true
+              exit 1
+            fi
+
+            echo "attempt ${attempt}/${max_attempts}: proxy.golang.org has not served ${module}@${TAG} yet"
+            if [ "${attempt}" -lt "${max_attempts}" ]; then
+              sleep 15
+            fi
+          done
+
+          if [ "${downloaded}" != true ]; then
+            echo "failed to download and verify ${module}@${TAG} from proxy.golang.org after ${max_attempts} attempts" >&2
+            cat "${meta}" >&2 || true
+            cat "${errlog}" >&2 || true
+            exit 1
+          fi
+
+          if ! jq -e --arg mod "${module}" --arg ver "${TAG}" '
+            (.Error // "") == "" and
+            .Path == $mod and
+            .Version == $ver and
+            ((.Zip // "") | length > 0) and
+            ((.Sum // "") | test("^h1:[A-Za-z0-9+/]+=*$")) and
+            ((.GoModSum // "") | test("^h1:[A-Za-z0-9+/]+=*$"))
+          ' "${meta}" > /dev/null; then
+            echo "downloaded module metadata for ${module}@${TAG} failed validation" >&2
+            cat "${meta}" >&2
+            exit 1
+          fi
+
+          origin_hash="$(jq -r '.Origin.Hash // empty' "${meta}")"
+          origin_ref="$(jq -r '.Origin.Ref // empty' "${meta}")"
+          if [ -z "${origin_hash}" ]; then
+            echo "downloaded module metadata is missing Origin.Hash; refusing to attest" >&2
+            cat "${meta}" >&2
+            exit 1
+          fi
+          if [ "${origin_hash}" != "${expected_commit}" ]; then
+            echo "proxy Origin.Hash (${origin_hash}) does not match tag ${TAG} commit (${expected_commit})" >&2
+            exit 1
+          fi
+          if [ "${origin_ref}" != "refs/tags/${TAG}" ]; then
+            echo "proxy Origin.Ref ('${origin_ref}') does not match expected 'refs/tags/${TAG}'" >&2
+            exit 1
+          fi
+
+          zip_path="$(jq -r '.Zip' "${meta}")"
+          mod_sum="$(jq -r '.Sum' "${meta}")"
+          if [ ! -s "${zip_path}" ]; then
+            echo "downloaded module zip '${zip_path}' is missing or empty" >&2
+            exit 1
+          fi
+          if [ ! -s "${zip_path}hash" ] || [ "$(cat "${zip_path}hash")" != "${mod_sum}" ]; then
+            echo "cached ziphash does not match verified sum '${mod_sum}'" >&2
+            exit 1
+          fi
+
+          zip_name="armory-${TAG}.zip"
+          cp "${zip_path}" "${dist}/${zip_name}"
+          (
+            cd "${dist}"
+            sha256sum "${zip_name}" > "${zip_name}.sha256"
+            sha256sum --check --strict "${zip_name}.sha256"
+          )
+          zip_sha256="$(cut -d' ' -f1 "${dist}/${zip_name}.sha256")"
+          if ! printf '%s' "${zip_sha256}" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "unexpected sha256 value '${zip_sha256}'" >&2
+            exit 1
+          fi
+          {
+            echo "zip_sha256=${zip_sha256}"
+            echo "mod_sum=${mod_sum}"
+          } >> "${GITHUB_OUTPUT}"
+          {
+            echo "module: \`${module}@${TAG}\`"
+            echo "commit: \`${expected_commit}\`"
+            echo "sumdb h1: \`${mod_sum}\`"
+            echo "zip sha256: \`${zip_sha256}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Keep the module zip for the next jobs
+        if: steps.tag.outputs.skip != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: module-zip
+          path: ${{ runner.temp }}/dist/
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  attest:
+    name: Attest module zip
+    needs: [fetch]
+    if: needs.fetch.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # provenance attestation, this job only
+      attestations: write
+    steps:
+      - name: Download the module zip
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: module-zip
+          path: ${{ runner.temp }}/dist
+
+      - name: Verify checksum and h1 against fetch outputs
+        env:
+          DIST: ${{ runner.temp }}/dist
+          TAG: ${{ github.ref_name }}
+          EXPECTED_SHA256: ${{ needs.fetch.outputs.zip_sha256 }}
+          EXPECTED_H1: ${{ needs.fetch.outputs.mod_sum }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "${TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "tag '${TAG}' is not a valid semver vX.Y.Z tag" >&2
+            exit 1
+          fi
+          if ! printf '%s' "${EXPECTED_SHA256}" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "missing or malformed fetch output zip_sha256" >&2
+            exit 1
+          fi
+          if ! printf '%s' "${EXPECTED_H1}" | grep -Eq '^h1:[A-Za-z0-9+/]+=*$'; then
+            echo "missing or malformed fetch output mod_sum" >&2
+            exit 1
+          fi
+
+          shopt -s nullglob
+          zips=("${DIST}"/armory-v*.zip)
+          zip_name="armory-${TAG}.zip"
+          if [ "${#zips[@]}" -ne 1 ] || [ "$(basename "${zips[0]}")" != "${zip_name}" ]; then
+            echo "expected only ${zip_name} in ${DIST}, found ${#zips[@]} zip(s)" >&2
+            exit 1
+          fi
+
+          actual_sha256="$(sha256sum "${DIST}/${zip_name}" | awk '{print $1}')"
+          if [ "${actual_sha256}" != "${EXPECTED_SHA256}" ]; then
+            echo "zip sha256 (${actual_sha256}) does not match fetch output (${EXPECTED_SHA256})" >&2
+            exit 1
+          fi
+          if [ "$(cat "${DIST}/${zip_name}.sha256")" != "${EXPECTED_SHA256}  ${zip_name}" ]; then
+            echo "${zip_name}.sha256 does not match fetch output ${EXPECTED_SHA256}" >&2
+            exit 1
+          fi
+          (cd "${DIST}" && sha256sum --check --strict "${zip_name}.sha256")
+
+          actual_h1="$(python3 -I - "${DIST}/${zip_name}" <<'PY'
+          import base64, hashlib, sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              by_name = {}
+              for info in z.infolist():
+                  if info.filename in by_name:
+                      sys.exit(f"duplicate filename in zip: {info.filename}")
+                  by_name[info.filename] = info
+              h = hashlib.sha256()
+              for name in sorted(by_name):
+                  if "\n" in name:
+                      sys.exit("dirhash: filename contains newline")
+                  hf = hashlib.sha256()
+                  with z.open(by_name[name]) as f:
+                      for chunk in iter(lambda: f.read(65536), b""):
+                          hf.update(chunk)
+                  h.update(f"{hf.hexdigest()}  {name}\n".encode("utf-8"))
+          print("h1:" + base64.b64encode(h.digest()).decode("ascii"))
+          PY
+          )"
+          if [ "${actual_h1}" != "${EXPECTED_H1}" ]; then
+            echo "zip h1 (${actual_h1}) does not match fetch output (${EXPECTED_H1})" >&2
+            exit 1
+          fi
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/dist/armory-v*.zip
+
+      - name: Verify the provenance
+        env:
+          DIST: ${{ runner.temp }}/dist
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA256: ${{ needs.fetch.outputs.zip_sha256 }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "${TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "tag '${TAG}' is not a valid semver vX.Y.Z tag" >&2
+            exit 1
+          fi
+          zip_name="armory-${TAG}.zip"
+          actual_sha256="$(sha256sum "${DIST}/${zip_name}" | awk '{print $1}')"
+          if [ "${actual_sha256}" != "${EXPECTED_SHA256}" ]; then
+            echo "zip sha256 (${actual_sha256}) does not match fetch output (${EXPECTED_SHA256})" >&2
+            exit 1
+          fi
+          gh attestation verify "${DIST}/${zip_name}" \
+            --repo "${REPOSITORY}" \
+            --signer-workflow "${REPOSITORY}/.github/workflows/release-provenance.yml" \
+            --source-ref "refs/tags/${TAG}"
+
+  # The only job with contents: write. It runs no fetch and no signing: it verifies the downloaded artifact
+  # against fetch outputs, attaches the zip and .sha256 to the draft release that release-please created,
+  # verifies both assets are uploaded and non-empty, and publishes the draft so immutable releases stay
+  # enabled.
+  upload:
+    name: Attach assets and publish release
+    needs: [fetch, attest]
+    if: needs.fetch.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # attach assets and publish the draft release of this tag, this job only
+    steps:
+      - name: Download the module zip
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: module-zip
+          path: ${{ runner.temp }}/dist
+
+      - name: Upload assets and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          DIST: ${{ runner.temp }}/dist
+          EXPECTED_SHA256: ${{ needs.fetch.outputs.zip_sha256 }}
+          EXPECTED_H1: ${{ needs.fetch.outputs.mod_sum }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "${TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "tag '${TAG}' is not a valid semver vX.Y.Z tag" >&2
+            exit 1
+          fi
+          if ! printf '%s' "${EXPECTED_SHA256}" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "missing or malformed fetch output zip_sha256" >&2
+            exit 1
+          fi
+          if ! printf '%s' "${EXPECTED_H1}" | grep -Eq '^h1:[A-Za-z0-9+/]+=*$'; then
+            echo "missing or malformed fetch output mod_sum" >&2
+            exit 1
+          fi
+
+          zip_name="armory-${TAG}.zip"
+          sha_name="${zip_name}.sha256"
+          actual_sha256="$(sha256sum "${DIST}/${zip_name}" | awk '{print $1}')"
+          if [ "${actual_sha256}" != "${EXPECTED_SHA256}" ]; then
+            echo "zip sha256 (${actual_sha256}) does not match fetch output (${EXPECTED_SHA256})" >&2
+            exit 1
+          fi
+          if [ "$(cat "${DIST}/${sha_name}")" != "${EXPECTED_SHA256}  ${zip_name}" ]; then
+            echo "${sha_name} does not match fetch output ${EXPECTED_SHA256}" >&2
+            exit 1
+          fi
+          (cd "${DIST}" && sha256sum --check --strict "${sha_name}")
+
+          actual_h1="$(python3 -I - "${DIST}/${zip_name}" <<'PY'
+          import base64, hashlib, sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              by_name = {}
+              for info in z.infolist():
+                  if info.filename in by_name:
+                      sys.exit(f"duplicate filename in zip: {info.filename}")
+                  by_name[info.filename] = info
+              h = hashlib.sha256()
+              for name in sorted(by_name):
+                  if "\n" in name:
+                      sys.exit("dirhash: filename contains newline")
+                  hf = hashlib.sha256()
+                  with z.open(by_name[name]) as f:
+                      for chunk in iter(lambda: f.read(65536), b""):
+                          hf.update(chunk)
+                  h.update(f"{hf.hexdigest()}  {name}\n".encode("utf-8"))
+          print("h1:" + base64.b64encode(h.digest()).decode("ascii"))
+          PY
+          )"
+          if [ "${actual_h1}" != "${EXPECTED_H1}" ]; then
+            echo "zip h1 (${actual_h1}) does not match fetch output (${EXPECTED_H1})" >&2
+            exit 1
+          fi
+
+          found=false
+          release=""
+          for attempt in $(seq 1 20); do
+            if release="$(gh release view "${TAG}" --json isDraft,assets 2> "${RUNNER_TEMP}/view.err")"; then
+              found=true
+              break
+            fi
+            echo "attempt ${attempt}/20: no GitHub release for ${TAG} yet, retrying in 15 s"
+            if [ "${attempt}" -lt 20 ]; then
+              sleep 15
+            fi
+          done
+          if [ "${found}" != true ]; then
+            echo "no GitHub release for ${TAG} after 5 minutes (last error: $(cat "${RUNNER_TEMP}/view.err")); create the draft, then re-run this job" >&2
+            exit 1
+          fi
+
+          assets_ready() {
+            jq -e --arg zip "${zip_name}" --arg sha "${sha_name}" '
+              (.assets // []) as $assets |
+              all([$zip, $sha][]; . as $name |
+                any($assets[]; .name == $name and .state == "uploaded" and .size > 0))
+            ' <<< "$1" > /dev/null
+          }
+
+          if [ "$(jq -r '.isDraft' <<< "${release}")" != true ]; then
+            if assets_ready "${release}"; then
+              echo "release ${TAG} is already published with ${zip_name} and ${sha_name}"
+              exit 0
+            fi
+            echo "release ${TAG} is already published and immutable without the required assets; refusing upload" >&2
+            exit 1
+          fi
+
+          uploaded=false
+          for attempt in $(seq 1 10); do
+            if gh release upload "${TAG}" --clobber \
+              "${DIST}/${zip_name}" "${DIST}/${sha_name}" 2> "${RUNNER_TEMP}/upload.err"; then
+              uploaded=true
+              break
+            fi
+            echo "attempt ${attempt}/10: could not upload to ${TAG} yet ($(tail -n 1 "${RUNNER_TEMP}/upload.err")), retrying in 15 s"
+            if [ "${attempt}" -lt 10 ]; then
+              sleep 15
+            fi
+          done
+          if [ "${uploaded}" != true ]; then
+            echo "failed to upload assets to ${TAG} (last error: $(cat "${RUNNER_TEMP}/upload.err")); leaving draft unpublished" >&2
+            exit 1
+          fi
+
+          updated="$(gh release view "${TAG}" --json isDraft,assets)"
+          if ! assets_ready "${updated}"; then
+            echo "assets ${zip_name} and ${sha_name} are not both uploaded and non-empty; leaving draft unpublished" >&2
+            exit 1
+          fi
+
+          gh release edit "${TAG}" --draft=false
+          echo "release ${TAG}: attached ${zip_name} and ${sha_name} and published the release" >> "${GITHUB_STEP_SUMMARY}"
