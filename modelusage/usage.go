@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"strconv"
 )
@@ -261,77 +260,6 @@ func parseCount(raw json.RawMessage) count {
 	return count{n: n, set: true}
 }
 
-// object is one JSON object of a reply, its members by their exact name.
-type object map[string]json.RawMessage
-
-// parseObject decodes data, which must be one JSON object and nothing more. A member name that appears twice
-// is ErrMalformed, so two usage blocks never merge and a count is never read from the second of two keys.
-// Names are matched exactly by the callers, never ignoring case.
-func parseObject(data []byte) (object, error) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
-		return nil, ErrMalformed
-	}
-	o := object{}
-	for dec.More() {
-		tok, err := dec.Token()
-		if err != nil {
-			return nil, ErrMalformed
-		}
-		name, ok := tok.(string)
-		if !ok {
-			return nil, ErrMalformed
-		}
-		if _, dup := o[name]; dup {
-			return nil, ErrMalformed
-		}
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			return nil, ErrMalformed
-		}
-		o[name] = raw
-	}
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
-		return nil, ErrMalformed
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return nil, ErrMalformed
-	}
-	return o, nil
-}
-
-// child returns the member name as an object, or nil when it is absent or null. Any other value is
-// ErrMalformed.
-func (o object) child(name string) (object, error) {
-	raw, ok := o[name]
-	if !ok || bytes.Equal(raw, []byte("null")) {
-		return nil, nil
-	}
-	return parseObject(raw)
-}
-
-// count returns the member name as a count, unset when it is absent or null.
-func (o object) count(name string) count {
-	raw, ok := o[name]
-	if !ok {
-		return count{}
-	}
-	return parseCount(raw)
-}
-
-// str returns the member name as a string, empty when it is absent or null. Any other value is ErrMalformed.
-func (o object) str(name string) (string, error) {
-	raw, ok := o[name]
-	if !ok || bytes.Equal(raw, []byte("null")) {
-		return "", nil
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return "", ErrMalformed
-	}
-	return s, nil
-}
-
 // anthropicUsage is Anthropic's usage block, in a reply and in the message_start and message_delta events.
 type anthropicUsage struct {
 	InputTokens              count
@@ -349,32 +277,45 @@ func (au *anthropicUsage) counts() []*count {
 		&au.CacheCreation1h, &au.CacheReadInputTokens, &au.ThinkingTokens}
 }
 
-// readAnthropicUsage reads the usage block o, which may be nil. server_tool_use counts requests, not tokens,
-// and is not read.
-func readAnthropicUsage(o object) (*anthropicUsage, error) {
-	if o == nil {
+// readAnthropicUsage reads the raw usage block v, which may be nil (absent) or null. server_tool_use counts
+// requests, not tokens, and is not read.
+func readAnthropicUsage(v []byte) (*anthropicUsage, error) {
+	if v == nil || isNull(v) {
 		return nil, nil
 	}
-	creation, err := o.child("cache_creation")
+	au := &anthropicUsage{}
+	err := members(v, func(name, value []byte) error {
+		switch string(name) {
+		case "input_tokens":
+			au.InputTokens = parseCount(value)
+		case "output_tokens":
+			au.OutputTokens = parseCount(value)
+		case "cache_creation_input_tokens":
+			au.CacheCreationInputTokens = parseCount(value)
+		case "cache_read_input_tokens":
+			au.CacheReadInputTokens = parseCount(value)
+		case "cache_creation":
+			return object(value, func(name, value []byte) error {
+				switch string(name) {
+				case "ephemeral_5m_input_tokens":
+					au.CacheCreation5m = parseCount(value)
+				case "ephemeral_1h_input_tokens":
+					au.CacheCreation1h = parseCount(value)
+				}
+				return nil
+			})
+		case "output_tokens_details":
+			return object(value, func(name, value []byte) error {
+				if string(name) == "thinking_tokens" {
+					au.ThinkingTokens = parseCount(value)
+				}
+				return nil
+			})
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	outDetails, err := o.child("output_tokens_details")
-	if err != nil {
-		return nil, err
-	}
-	au := &anthropicUsage{
-		InputTokens:              o.count("input_tokens"),
-		OutputTokens:             o.count("output_tokens"),
-		CacheCreationInputTokens: o.count("cache_creation_input_tokens"),
-		CacheReadInputTokens:     o.count("cache_read_input_tokens"),
-	}
-	if creation != nil {
-		au.CacheCreation5m = creation.count("ephemeral_5m_input_tokens")
-		au.CacheCreation1h = creation.count("ephemeral_1h_input_tokens")
-	}
-	if outDetails != nil {
-		au.ThinkingTokens = outDetails.count("thinking_tokens")
 	}
 	return au, nil
 }
@@ -384,41 +325,61 @@ type openAIUsage struct {
 	in, out, cached, written, written30m, written12h, reasoning count
 }
 
-// readOpenAIUsage reads the usage block o of family f, which may be nil. Chat completions name the counts
-// prompt_tokens and completion_tokens with prompt_tokens_details and completion_tokens_details, the Responses
-// API input_tokens and output_tokens with input_tokens_details and output_tokens_details. Only the Responses
-// API reference defines cache_write_tokens_details, so it is read for that family alone.
-func readOpenAIUsage(o object, f Family) (*openAIUsage, error) {
-	if o == nil {
+// readOpenAIUsage reads the raw usage block v of family f, which may be nil (absent) or null. Chat completions
+// name the counts prompt_tokens and completion_tokens with prompt_tokens_details and completion_tokens_details,
+// the Responses API input_tokens and output_tokens with input_tokens_details and output_tokens_details. Only
+// the Responses API reference defines cache_write_tokens_details, so it is read for that family alone.
+func readOpenAIUsage(v []byte, f Family) (*openAIUsage, error) {
+	if v == nil || isNull(v) {
 		return nil, nil
 	}
 	inName, outName := "input_tokens", "output_tokens"
 	if f == OpenAIChat {
 		inName, outName = "prompt_tokens", "completion_tokens"
 	}
-	inDetails, err := o.child(inName + "_details")
-	if err != nil {
-		return nil, err
-	}
-	outDetails, err := o.child(outName + "_details")
-	if err != nil {
-		return nil, err
-	}
-	ou := &openAIUsage{in: o.count(inName), out: o.count(outName)}
-	if inDetails != nil {
-		ou.cached, ou.written = inDetails.count("cached_tokens"), inDetails.count("cache_write_tokens")
-		if f == OpenAIResponses {
-			lifetimes, err := inDetails.child("cache_write_tokens_details")
-			if err != nil {
-				return nil, err
+	ou := &openAIUsage{}
+	inDetails := func(name, value []byte) error {
+		switch string(name) {
+		case "cached_tokens":
+			ou.cached = parseCount(value)
+		case "cache_write_tokens":
+			ou.written = parseCount(value)
+		case "cache_write_tokens_details":
+			if f != OpenAIResponses {
+				return nil
 			}
-			if lifetimes != nil {
-				ou.written30m, ou.written12h = lifetimes.count("ttl_30m_tokens"), lifetimes.count("ttl_12h_tokens")
-			}
+			return object(value, func(name, value []byte) error {
+				switch string(name) {
+				case "ttl_30m_tokens":
+					ou.written30m = parseCount(value)
+				case "ttl_12h_tokens":
+					ou.written12h = parseCount(value)
+				}
+				return nil
+			})
 		}
+		return nil
 	}
-	if outDetails != nil {
-		ou.reasoning = outDetails.count("reasoning_tokens")
+	err := members(v, func(name, value []byte) error {
+		switch n := string(name); n {
+		case inName:
+			ou.in = parseCount(value)
+		case outName:
+			ou.out = parseCount(value)
+		case inName + "_details":
+			return object(value, inDetails)
+		case outName + "_details":
+			return object(value, func(name, value []byte) error {
+				if string(name) == "reasoning_tokens" {
+					ou.reasoning = parseCount(value)
+				}
+				return nil
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return ou, nil
 }

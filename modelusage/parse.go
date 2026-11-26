@@ -3,6 +3,7 @@ package modelusage
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,27 +30,32 @@ func ParseJSON(f Family, r io.Reader, lim Limits) (Usage, error) {
 	if err != nil {
 		return Usage{}, fmt.Errorf("modelusage: reading the reply: %w", err)
 	}
-	reply, err := parseObject(data)
-	if err != nil {
-		return Usage{}, err
+	if !json.Valid(data) {
+		return Usage{}, ErrMalformed
 	}
-	block, err := reply.child("usage")
+	var block []byte
+	err = members(data, func(name, value []byte) error {
+		if string(name) == nameUsage {
+			block = value
+		}
+		return nil
+	})
 	if err != nil {
 		return Usage{}, err
 	}
 	return usageOf(block, f, lim.MaxTokens)
 }
 
-// usageOf converts the complete usage block o of family f, which may be nil.
-func usageOf(o object, f Family, maxTokens int64) (Usage, error) {
+// usageOf converts the complete raw usage block v of family f, which may be nil or null.
+func usageOf(v []byte, f Family, maxTokens int64) (Usage, error) {
 	if f == Anthropic {
-		au, err := readAnthropicUsage(o)
+		au, err := readAnthropicUsage(v)
 		if err != nil {
 			return Usage{}, err
 		}
 		return anthropicOf(au, maxTokens)
 	}
-	ou, err := readOpenAIUsage(o, f)
+	ou, err := readOpenAIUsage(v, f)
 	if err != nil {
 		return Usage{}, err
 	}
@@ -227,46 +233,91 @@ func (s *streamState) event(data []byte) error {
 	}
 }
 
-// decodeEvent decodes the data of one event as an object and returns it with its type member.
-func decodeEvent(data []byte) (object, string, error) {
-	ev, err := parseObject(data)
-	if err != nil {
-		return nil, "", err
+// Names the parser matches in more than one place.
+const (
+	nameUsage = "usage"
+	typeError = "error"
+)
+
+// eventFields are the members of an event that the parser reads, raw, nil when absent.
+type eventFields struct {
+	typ      []byte // type, decoded
+	message  []byte // Anthropic message_start: message
+	usage    []byte // Anthropic message_delta, chat chunk: usage
+	response []byte // Responses final events: response
+	err      []byte // chat chunk: error
+}
+
+// decodeEvent decodes the data of one event, which must be one JSON object, and returns the members the parser
+// reads. Every other member is skipped without being decoded.
+func decodeEvent(data []byte) (eventFields, error) {
+	var ev eventFields
+	if !json.Valid(data) {
+		return ev, ErrMalformed
 	}
-	typ, err := ev.str("type")
-	if err != nil {
-		return nil, "", err
-	}
-	return ev, typ, nil
+	err := members(data, func(name, value []byte) error {
+		switch string(name) {
+		case "type":
+			t, err := str(value)
+			ev.typ = t
+			return err
+		case "message":
+			ev.message = value
+		case nameUsage:
+			ev.usage = value
+		case "response":
+			ev.response = value
+		case typeError:
+			ev.err = value
+		}
+		return nil
+	})
+	return ev, err
+}
+
+// usageMember returns the raw usage member of the raw object v, nil when v or the member is absent or null. A
+// v that is not an object or null is ErrMalformed.
+func usageMember(v []byte) ([]byte, error) {
+	var block []byte
+	err := object(v, func(name, value []byte) error {
+		if string(name) == nameUsage {
+			block = value
+		}
+		return nil
+	})
+	return block, err
 }
 
 func (s *streamState) anthropicEvent(data []byte) error {
-	ev, typ, err := decodeEvent(data)
+	ev, err := decodeEvent(data)
 	if err != nil {
 		return err
 	}
-	switch typ {
+	switch string(ev.typ) {
 	case "message_start":
-		msg, err := ev.child("message")
+		if ev.message == nil || isNull(ev.message) {
+			return ErrMalformed
+		}
+		block, err := usageMember(ev.message)
 		if err != nil {
 			return err
 		}
-		if s.started || msg == nil {
+		if s.started {
 			return ErrMalformed
 		}
 		s.started = true
-		return s.merge(msg)
+		return s.merge(block)
 	case "message_delta":
 		if !s.started || s.done {
 			return ErrMalformed
 		}
-		return s.merge(ev)
+		return s.merge(ev.usage)
 	case "message_stop":
 		if !s.started || s.done {
 			return ErrMalformed
 		}
 		s.done = true
-	case "error":
+	case typeError:
 		if s.done {
 			return nil
 		}
@@ -275,13 +326,9 @@ func (s *streamState) anthropicEvent(data []byte) error {
 	return nil
 }
 
-// merge replaces each count of the Anthropic total that the usage member of parent carries.
-func (s *streamState) merge(parent object) error {
-	block, err := parent.child("usage")
-	if err != nil {
-		return err
-	}
-	au, err := readAnthropicUsage(block)
+// merge replaces each count of the Anthropic total that the raw usage block v carries.
+func (s *streamState) merge(v []byte) error {
+	au, err := readAnthropicUsage(v)
 	if err != nil || au == nil {
 		return err
 	}
@@ -306,18 +353,17 @@ func (s *streamState) chatEvent(data []byte) error {
 		s.done = true
 		return nil
 	}
-	chunk, err := parseObject(data)
+	ev, err := decodeEvent(data)
 	if err != nil {
 		return err
 	}
-	if raw, ok := chunk["error"]; ok && !bytes.Equal(raw, []byte("null")) {
+	if ev.err != nil && !isNull(ev.err) {
 		return ErrTruncated
 	}
-	block, err := chunk.child("usage")
-	if err != nil || block == nil {
-		return err
+	if ev.usage == nil || isNull(ev.usage) {
+		return nil
 	}
-	u, err := usageOf(block, OpenAIChat, s.maxTokens)
+	u, err := usageOf(ev.usage, OpenAIChat, s.maxTokens)
 	if err != nil {
 		return err
 	}
@@ -329,23 +375,19 @@ func (s *streamState) responsesEvent(data []byte) error {
 	if s.done && bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
 		return nil
 	}
-	ev, typ, err := decodeEvent(data)
+	ev, err := decodeEvent(data)
 	if err != nil {
 		return err
 	}
-	switch typ {
+	switch string(ev.typ) {
 	case "response.completed", "response.incomplete", "response.failed":
 		if s.done {
 			return ErrMalformed
 		}
-		resp, err := ev.child("response")
-		if err != nil {
-			return err
-		}
-		if resp == nil {
+		if ev.response == nil || isNull(ev.response) {
 			return ErrMalformed
 		}
-		block, err := resp.child("usage")
+		block, err := usageMember(ev.response)
 		if err != nil {
 			return err
 		}
@@ -354,7 +396,7 @@ func (s *streamState) responsesEvent(data []byte) error {
 			return err
 		}
 		s.usage, s.seen, s.done = u, true, true
-	case "error":
+	case typeError:
 		if s.done {
 			return nil
 		}
