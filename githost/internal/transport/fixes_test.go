@@ -58,13 +58,13 @@ func TestNotModifiedOnlyConditional(t *testing.T) {
 		ok      bool
 		unknown bool
 	}{
-		{"GET with If-None-Match", http.MethodGet, `"v1"`, nil, true, false},
-		{"HEAD with If-None-Match", http.MethodHead, `"v1"`, nil, true, false},
+		{"GET with If-None-Match", http.MethodGet, etagV1, nil, true, false},
+		{"HEAD with If-None-Match", http.MethodHead, etagV1, nil, true, false},
 		{"GET with If-Modified-Since", http.MethodGet, "",
 			http.Header{"If-Modified-Since": {"Wed, 25 Nov 2026 12:00:00 GMT"}}, true, false},
 		{"GET unconditional", http.MethodGet, "", nil, false, false},
 		{"HEAD unconditional", http.MethodHead, "", nil, false, false},
-		{"POST with If-None-Match", http.MethodPost, `"v1"`, nil, false, true},
+		{"POST with If-None-Match", http.MethodPost, etagV1, nil, false, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -199,7 +199,7 @@ func TestHeadersCheckedBeforeTheWrite(t *testing.T) {
 // Accept-Encoding the client sets itself, are refused when the client is built.
 func TestNewRefusesBadHeaders(t *testing.T) {
 	cases := map[string]Config{
-		"value with a line feed": {Header: http.Header{"X-Api-Version": {"1\n2"}}},
+		"value with a line feed": {Header: http.Header{hAPIVersion: {"1\n2"}}},
 		"name with a space":      {Header: http.Header{"X Api": {"1"}}},
 		"empty name":             {Header: http.Header{"": {"1"}}},
 		"name with a colon":      {Header: http.Header{"X:y": {"1"}}},
@@ -348,9 +348,9 @@ func TestTypedNilCallbacks(t *testing.T) {
 		t.Errorf("New with a nil CredentialFunc = %v, want ErrInvalidConfig", err)
 	}
 	for name, cerr := range map[string]error{
-		"retryable": (*githost.RetryableError)(nil),
-		"error":     (*githost.Error)(nil),
-		"refusal":   (*githost.Refusal)(nil),
+		caseRetryable: (*githost.RetryableError)(nil),
+		"error":       (*githost.Error)(nil),
+		"refusal":     (*githost.Refusal)(nil),
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := newServer(t, func(w http.ResponseWriter, _ *http.Request, _ int) { okBody(w) })

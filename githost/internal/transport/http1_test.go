@@ -111,6 +111,7 @@ func TestHTTP2DebugLogsNoToken(t *testing.T) {
 	}
 	secret := strings.Join([]string{"h2", "dbg", "secret", "7f3a"}, "-")
 	control := strings.Join([]string{"h2", "dbg", "control", "c41e"}, "-")
+	// #nosec G204 G702 -- the test re-executes its own binary with fixed arguments
 	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestHTTP2DebugHelper$", "-test.v", "-test.count=1")
 	cmd.Env = append(os.Environ(), "GODEBUG=http2debug=2", h2HelperEnv+"=1",
 		"ARMORY_H2_SECRET="+secret, "ARMORY_H2_CONTROL="+control)
@@ -283,8 +284,9 @@ func TestNewIgnoresProcessTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := defaultTransport(t, c)
-	if tr == http.DefaultTransport || tr.DialTLSContext != nil || tr.DialTLS != nil || tr.ForceAttemptHTTP2 ||
-		tr.TLSClientConfig.InsecureSkipVerify {
+	if tr == http.DefaultTransport || tr.DialTLSContext != nil ||
+		tr.DialTLS != nil || //nolint:staticcheck // the test asserts the deprecated hook is unset
+		tr.ForceAttemptHTTP2 || tr.TLSClientConfig.InsecureSkipVerify {
 		t.Errorf("the default transport took settings of http.DefaultTransport: %+v", tr)
 	}
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { okBody(w) }))

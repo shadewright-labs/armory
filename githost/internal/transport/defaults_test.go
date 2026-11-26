@@ -41,13 +41,25 @@ func TestDefaultTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	tr := defaultTransport(t, c)
+	t.Run("client and pin", func(t *testing.T) { assertDefaultClient(t, c) })
+	t.Run("TLS and timeouts", func(t *testing.T) { assertDefaultTLSAndTimeouts(t, tr) })
+	t.Run("HTTP1 and dialer", func(t *testing.T) { assertDefaultHTTP1AndDialer(t, tr) })
+	t.Run("hooks compression and proxy", func(t *testing.T) { assertDefaultHooksAndProxy(t, tr) })
+}
+
+func assertDefaultClient(t *testing.T, c *Client) {
+	t.Helper()
 	if c.attemptMax != DefaultAttemptTimeout || c.httpClient.CheckRedirect == nil {
 		t.Errorf("attempt timeout %s, redirect policy set %v", c.attemptMax, c.httpClient.CheckRedirect != nil)
 	}
 	if p := c.httpClient.Transport.(pinned); p.host != apiHost {
 		t.Errorf("pinned host %q", p.host)
 	}
-	tr := defaultTransport(t, c)
+}
+
+func assertDefaultTLSAndTimeouts(t *testing.T, tr *http.Transport) {
+	t.Helper()
 	if tr.TLSClientConfig == nil || tr.TLSClientConfig.MinVersion != tls.VersionTLS12 {
 		t.Errorf("TLS config %+v, want MinVersion TLS 1.2", tr.TLSClientConfig)
 	}
@@ -60,6 +72,10 @@ func TestDefaultTransport(t *testing.T) {
 	if tr.MaxResponseHeaderBytes != 256<<10 {
 		t.Errorf("header limit %d", tr.MaxResponseHeaderBytes)
 	}
+}
+
+func assertDefaultHTTP1AndDialer(t *testing.T, tr *http.Transport) {
+	t.Helper()
 	if dialer.Timeout != 10*time.Second || dialer.KeepAlive != 30*time.Second || tr.DialContext == nil {
 		t.Errorf("dialer %+v, dial func set %v", dialer, tr.DialContext != nil)
 	}
@@ -69,12 +85,22 @@ func TestDefaultTransport(t *testing.T) {
 		t.Errorf("HTTP/2 is not off: force %v, next protos %v %v, protocols %v", tr.ForceAttemptHTTP2,
 			tr.TLSNextProto, tr.TLSClientConfig.NextProtos, tr.Protocols)
 	}
-	if !tr.DisableCompression || tr.DialTLSContext != nil || tr.DialTLS != nil || dialer.Resolver == nil ||
-		dialer.Resolver == net.DefaultResolver {
-		t.Errorf("compression off %v, TLS dial hook set %v, private resolver %v", tr.DisableCompression,
-			tr.DialTLSContext != nil || tr.DialTLS != nil, dialer.Resolver != nil && dialer.Resolver != net.DefaultResolver)
+}
+
+func assertDefaultHooksAndProxy(t *testing.T, tr *http.Transport) {
+	t.Helper()
+	if !tr.DisableCompression || dialer.Resolver == nil || dialer.Resolver == net.DefaultResolver {
+		t.Errorf("compression off %v, private resolver %v", tr.DisableCompression,
+			dialer.Resolver != nil && dialer.Resolver != net.DefaultResolver)
 	}
-	if tr.Proxy == nil || reflect.ValueOf(tr.Proxy).Pointer() != reflect.ValueOf(http.ProxyFromEnvironment).Pointer() {
+	if tr.DialTLSContext != nil {
+		t.Error("DialTLSContext is set")
+	}
+	if tr.DialTLS != nil { //nolint:staticcheck // the test asserts the deprecated hook is unset
+		t.Error("DialTLS is set")
+	}
+	if tr.Proxy == nil ||
+		reflect.ValueOf(tr.Proxy).Pointer() != reflect.ValueOf(http.ProxyFromEnvironment).Pointer() {
 		t.Error("proxy is not taken from the environment")
 	}
 }

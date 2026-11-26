@@ -95,8 +95,13 @@ func TestObserverOnError(t *testing.T) {
 }
 
 const (
-	pathThing    = "/repos/o/n/things/x"
-	tmplContents = "/repos/{owner}/{repo}/contents/{path...}"
+	pathThing     = "/repos/o/n/things/x"
+	tmplContents  = "/repos/{owner}/{repo}/contents/{path...}"
+	pathRateLimit = "/rate_limit"
+	pathXY        = "/x/y"
+	pathXSlash    = "/x/"
+	pathDotDot    = "/a/../b"
+	pathDot       = "/a/./b"
 )
 
 // TestTemplateMatchesPath: a template must name the path's segments: its fixed segments equal the
@@ -112,7 +117,7 @@ func TestTemplateMatchesPath(t *testing.T) {
 		{pathThing, template, true},
 		{"/repos/o/n/contents/a/b/c.txt", tmplContents, true},
 		{"/repos/o/n/contents/c.txt", tmplContents, true},
-		{"/rate_limit", "/rate_limit", true},
+		{pathRateLimit, pathRateLimit, true},
 		{"/repos/o/n/things/" + pathCanary, "/repos/{owner}/{repo}/things/" + pathCanary, false},
 		{pathThing, "/repos/{owner}/{repo}/things", false},
 		{"/repos/o/n/things", template, false},
@@ -123,9 +128,9 @@ func TestTemplateMatchesPath(t *testing.T) {
 		{pathThing, "/repos/{owner}/{repo}/things/{id", false},
 		{"/repos/o/n/contents/", tmplContents, false},
 		{"/repos/o/n/a/b", "/repos/{owner}/{repo}/{path...}/b", false},
-		{"/x/y", "/x/{a}?q", false},
-		{"/x/y", "/x/{a} ", false},
-		{"/x/", "/x/", false},
+		{pathXY, "/x/{a}?q", false},
+		{pathXY, "/x/{a} ", false},
+		{pathXSlash, pathXSlash, false},
 		// The template is matched against the path the host routes: no encoded slash or backslash, no
 		// dot segment, and the path as sent, byte for byte.
 		{"/repos/o/n/things/a%2Fb", template, false},
@@ -143,8 +148,8 @@ func TestTemplateMatchesPath(t *testing.T) {
 		{"/repos/o/n/contents/a/./b", tmplContents, false},
 		{"/repos/o/n/contents/a%2Fb", tmplContents, false},
 		{"/repos/o/n/contents/..", tmplContents, false},
-		{"/a/../b", "/a/../b", false},
-		{"/a/./b", "/a/./b", false},
+		{pathDotDot, pathDotDot, false},
+		{pathDot, pathDot, false},
 		{"/repos/o/n/things/a%20b", template, true},
 		{"/repos/o/n/things/..a", template, true},
 	}
@@ -323,7 +328,7 @@ func FuzzPathTemplate(f *testing.F) {
 		{pathThing, template},
 		{"/repos/o/n/contents/a/b/c.txt", tmplContents},
 		{"/repos/o/n/contents/c.txt", tmplContents},
-		{"/rate_limit", "/rate_limit"},
+		{pathRateLimit, pathRateLimit},
 		{"/repos/o/n/things/" + pathCanary, "/repos/{owner}/{repo}/things/" + pathCanary},
 		{pathThing, "/repos/{owner}/{repo}/things"},
 		{"/repos/o/n/things", template},
@@ -334,9 +339,9 @@ func FuzzPathTemplate(f *testing.F) {
 		{pathThing, "/repos/{owner}/{repo}/things/{id"},
 		{"/repos/o/n/contents/", tmplContents},
 		{"/repos/o/n/a/b", "/repos/{owner}/{repo}/{path...}/b"},
-		{"/x/y", "/x/{a}?q"},
-		{"/x/y", "/x/{a} "},
-		{"/x/", "/x/"},
+		{pathXY, "/x/{a}?q"},
+		{pathXY, "/x/{a} "},
+		{pathXSlash, pathXSlash},
 		{"/repos/o/n/things/a%2Fb", template},
 		{"/repos/o/n/things/a%2fb", template},
 		{"/repos/o/n/things/a%5Cb", template},
@@ -352,8 +357,8 @@ func FuzzPathTemplate(f *testing.F) {
 		{"/repos/o/n/contents/a/./b", tmplContents},
 		{"/repos/o/n/contents/a%2Fb", tmplContents},
 		{"/repos/o/n/contents/..", tmplContents},
-		{"/a/../b", "/a/../b"},
-		{"/a/./b", "/a/./b"},
+		{pathDotDot, pathDotDot},
+		{pathDot, pathDot},
 		{"/repos/o/n/things/a%20b", template},
 		{"/repos/o/n/things/..a", template},
 		{"@evil.example.test/x", template},

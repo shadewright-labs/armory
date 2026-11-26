@@ -311,7 +311,7 @@ func TestTokenAskedPerAttempt(t *testing.T) {
 // written gives an error that says the outcome is unknown, whatever the credential's class.
 func TestCredentialFailsAfterLostWrite(t *testing.T) {
 	for name, credErr := range map[string]error{
-		"retryable":    &githost.RetryableError{RetryAfter: time.Hour, Err: errors.New(tokenCanary)},
+		caseRetryable:  &githost.RetryableError{RetryAfter: time.Hour, Err: errors.New(tokenCanary)},
 		"unauthorized": fmt.Errorf("%s: %w", tokenCanary, githost.ErrUnauthorized),
 		"plain":        errors.New(tokenCanary),
 	} {

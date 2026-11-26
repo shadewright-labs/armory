@@ -14,7 +14,8 @@ const (
 	hRemaining = "X-RateLimit-Remaining"
 	hReset     = "X-RateLimit-Reset"
 	// unusable is a header value that is neither a number nor a date.
-	unusable = "soon"
+	unusable     = "soon"
+	pastInt64Max = "9223372036854775808"
 )
 
 var now = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
@@ -99,7 +100,7 @@ func FuzzParse(f *testing.F) {
 	const maxDelay = 10 * time.Minute
 	values := []string{
 		"", "7", " 7 ", "0", "-5", "-1", "1.5", "600", "601", "99999999999999",
-		"9223372036854775807", "9223372036854775808", "99999999999999999999999999999999",
+		"9223372036854775807", pastInt64Max, "99999999999999999999999999999999",
 		"3600", "3599", "+7", "-0", "+0", "-9223372036854775808", "0x10", "7 7", "٧", "0007",
 		unusable,
 		now.Format(http.TimeFormat),
@@ -114,7 +115,7 @@ func FuzzParse(f *testing.F) {
 	}
 	f.Add("7", now.Unix(), int64(0), int64(0))
 	f.Add("7", now.Unix(), int64(0), int64(-1))
-	f.Add("9223372036854775808", now.Unix(), int64(900_000_000), int64(math.MaxInt64))
+	f.Add(pastInt64Max, now.Unix(), int64(900_000_000), int64(math.MaxInt64))
 	f.Add("2", int64(1), int64(900_000_000), int64(500*time.Millisecond))
 	f.Add("1", int64(math.MinInt64), int64(0), int64(time.Hour))
 	f.Fuzz(func(t *testing.T, v string, nowUnix, nowNsec, capNs int64) {
@@ -155,7 +156,7 @@ func FuzzHeader(f *testing.F) {
 		{"", "0", reset(45 * time.Second), now.Unix(), 0, time.Hour},
 		{"", "0", reset(48 * time.Hour), now.Unix(), 0, time.Hour},
 		{"", "0", "9223372036854775807", now.Unix(), 0, time.Hour},
-		{"", "0", "9223372036854775808", now.Unix(), 0, time.Hour},
+		{"", "0", pastInt64Max, now.Unix(), 0, time.Hour},
 		{"", "0", reset(-time.Minute), now.Unix(), 0, time.Hour},
 		{"", "0", unusable, now.Unix(), 0, time.Hour},
 		{"", "10", reset(time.Minute), now.Unix(), 0, time.Hour},
@@ -174,7 +175,7 @@ func FuzzHeader(f *testing.F) {
 		{"", "0", "1", 1, 900_000_000, time.Hour},
 		{"", "0", "+7", 1, 0, time.Hour},
 		{"", "0", "2", 1, 0, 300 * time.Millisecond},
-		{"", "0", "9223372036854775808", 0, 0, math.MaxInt64},
+		{"", "0", pastInt64Max, 0, 0, math.MaxInt64},
 		{"12", "0", "1", now.Unix(), 0, 0},
 		{"12", "0", "1", now.Unix(), 0, -time.Second},
 	}
@@ -205,7 +206,7 @@ func TestParseAtTheLimits(t *testing.T) {
 		want time.Duration
 		ok   bool
 	}{
-		{"9223372036854775808", time.Hour, true},
+		{pastInt64Max, time.Hour, true},
 		{"99999999999999999999999999999999", time.Hour, true},
 		{"9223372036854775807", time.Hour, true},
 		{"3600", time.Hour, true},
@@ -226,7 +227,7 @@ func TestParseAtTheLimits(t *testing.T) {
 		}
 	}
 	// A cap of math.MaxInt64 must not overflow when multiplying seconds to Duration.
-	for _, v := range []string{"9223372037", "9223372036854775807", "9223372036854775808"} {
+	for _, v := range []string{"9223372037", "9223372036854775807", pastInt64Max} {
 		if d, ok := parse(v, now, math.MaxInt64); d != math.MaxInt64 || !ok {
 			t.Errorf("parse(%q, MaxInt64) = %d, %v; want MaxInt64, true", v, d, ok)
 		}
@@ -253,12 +254,13 @@ func TestParseResetAtTheLimits(t *testing.T) {
 		{"sub-second now, cap above", "3", time.Unix(1, 900_000_000), 2 * time.Second, 1100 * time.Millisecond},
 		{"sub-second now, past", "1", time.Unix(1, 900_000_000), time.Hour, 0},
 		{"plus sign", "+7", time.Unix(1, 0), time.Hour, 0},
-		{"past the integer limit", "9223372036854775808", time.Unix(1, 0), time.Hour, time.Hour},
+		{"past the integer limit", pastInt64Max, time.Unix(1, 0), time.Hour, time.Hour},
 		{"largest", "9223372036854775807", time.Unix(1, 0), time.Hour, time.Hour},
 		{"cap below a second", "2", time.Unix(1, 0), 300 * time.Millisecond, 300 * time.Millisecond},
-		{"max cap overflow exact", "9223372037", time.Unix(0, 900_000_000), math.MaxInt64, 9223372036*time.Second + 100*time.Millisecond},
+		{"max cap overflow exact", "9223372037", time.Unix(0, 900_000_000), math.MaxInt64,
+			9223372036*time.Second + 100*time.Millisecond},
 		{"max cap overflow capped", "9223372037", time.Unix(0, 100_000_000), math.MaxInt64, math.MaxInt64},
-		{"max cap huge reset", "9223372036854775808", time.Unix(0, 0), math.MaxInt64, math.MaxInt64},
+		{"max cap huge reset", pastInt64Max, time.Unix(0, 0), math.MaxInt64, math.MaxInt64},
 	}
 	for _, c := range cases {
 		if got := ParseReset(c.v, c.now, c.maxDelay); got != c.want {

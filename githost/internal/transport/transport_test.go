@@ -32,9 +32,12 @@ const (
 	evilURL = "https://evil.example.test/x"
 	hRetry  = "Retry-After"
 	// at joins user information to a host in fixtures, so no fixture reads as an email address.
-	at       = "@"
-	template = "/repos/{owner}/{repo}/things/{id}"
-	base     = 10 * time.Millisecond
+	at            = "@"
+	template      = "/repos/{owner}/{repo}/things/{id}"
+	base          = 10 * time.Millisecond
+	hAPIVersion   = "X-Api-Version"
+	etagV1        = `"v1"`
+	caseRetryable = "retryable"
 )
 
 var fixedNow = time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
@@ -328,7 +331,7 @@ func TestRedirectNotFollowed(t *testing.T) {
 // TestNotModified: a conditional request gets its 304 back, not an error.
 func TestNotModified(t *testing.T) {
 	s := newServer(t, func(w http.ResponseWriter, r *http.Request, _ int) {
-		if r.Header.Get("If-None-Match") == `"v1"` {
+		if r.Header.Get("If-None-Match") == etagV1 {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
@@ -336,7 +339,7 @@ func TestNotModified(t *testing.T) {
 	})
 	h := newHarness(t, s, nil)
 	r := get()
-	r.IfNoneMatch = `"v1"`
+	r.IfNoneMatch = etagV1
 	resp, err := h.c.Do(t.Context(), r)
 	if err != nil || resp.Status != http.StatusNotModified || resp.Body != nil {
 		t.Fatalf("Do = %+v, %v; want a 304", resp, err)
@@ -865,7 +868,7 @@ func TestCredentialErrorsKeepClassOnly(t *testing.T) {
 		{"canceled", errors.Join(leak, context.Canceled), githost.Token{}, []error{context.Canceled}, false},
 		{"deadline", errors.Join(leak, context.DeadlineExceeded), githost.Token{},
 			[]error{context.DeadlineExceeded}, true},
-		{"retryable", &githost.RetryableError{RetryAfter: time.Hour, Err: leak}, githost.Token{}, nil, true},
+		{caseRetryable, &githost.RetryableError{RetryAfter: time.Hour, Err: leak}, githost.Token{}, nil, true},
 		{"not found", errors.Join(leak, githost.ErrNotFound), githost.Token{}, []error{githost.ErrNotFound}, false},
 		{"forbidden", errors.Join(leak, githost.ErrForbidden), githost.Token{}, []error{githost.ErrForbidden}, false},
 		{"unauthorized", errors.Join(leak, githost.ErrUnauthorized), githost.Token{},
@@ -985,13 +988,13 @@ func TestRequestHeaders(t *testing.T) {
 		got = r.Header.Clone()
 		okBody(w)
 	})
-	h := newHarness(t, s, func(c *Config) { c.Header = http.Header{"X-Api-Version": {"2022-11-28"}} })
+	h := newHarness(t, s, func(c *Config) { c.Header = http.Header{hAPIVersion: {"2022-11-28"}} })
 	r := post(true)
 	r.Accept = "application/vnd.github+json"
 	if _, err := h.c.Do(t.Context(), r); err != nil {
 		t.Fatal(err)
 	}
-	for k, v := range map[string]string{"X-Api-Version": "2022-11-28", "Accept": "application/vnd.github+json",
+	for k, v := range map[string]string{hAPIVersion: "2022-11-28", "Accept": "application/vnd.github+json",
 		"Content-Type": "application/json", "User-Agent": "armory-githost"} {
 		if got.Get(k) != v {
 			t.Errorf("%s = %q, want %q", k, got.Get(k), v)
