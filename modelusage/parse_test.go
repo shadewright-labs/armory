@@ -329,11 +329,13 @@ func TestParseStreamInline(t *testing.T) {
 		{name: "malformed event after the final event", family: Anthropic, body: start + delta + stop + "data: {\n\n",
 			wantErr: ErrMalformed},
 		{name: "responses done after the final event", family: OpenAIResponses,
-			body: "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\n" +
+			body: "data: {\"type\":\"response.completed\",\"response\":" +
+				"{\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\n" +
 				"data: [DONE]\n\n",
 			want: Usage{Family: OpenAIResponses, InputTokens: 2, OutputTokens: 3}},
 		{name: "responses event after the final event", family: OpenAIResponses,
-			body: "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\n" +
+			body: "data: {\"type\":\"response.completed\",\"response\":" +
+				"{\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\n" +
 				"data: {\"type\":\"response.output_text.done\"}\n\n",
 			want: Usage{Family: OpenAIResponses, InputTokens: 2, OutputTokens: 3}},
 		{name: "chat second done", family: OpenAIChat,
@@ -450,7 +452,8 @@ func TestReaderErrorIsWrapped(t *testing.T) {
 
 // TestLineEndsAcrossReads feeds a stream one byte at a time, so that a CR is read before the byte after it.
 func TestLineEndsAcrossReads(t *testing.T) {
-	const body = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n" +
+	const body = "data: {\"type\":\"message_start\",\"message\":" +
+		"{\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n" +
 		"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n" +
 		"data: {\"type\":\"message_stop\"}\n\n"
 	want := Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}
@@ -508,7 +511,7 @@ func TestStreamReaderError(t *testing.T) {
 			if final != (err == nil) {
 				t.Errorf("err = %v, want an error: %v", err, !final)
 			}
-			if tt.readErr != io.EOF && !final && !errors.Is(err, tt.readErr) {
+			if !errors.Is(tt.readErr, io.EOF) && !final && !errors.Is(err, tt.readErr) {
 				t.Errorf("err = %v, want it to wrap the reader's error", err)
 			}
 			var te *TruncatedError

@@ -1,6 +1,9 @@
 package modelusage
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestUsageTotals(t *testing.T) {
 	tests := []struct {
@@ -85,7 +88,7 @@ func TestBreakdownsArePartsOfTheirParent(t *testing.T) {
 	for i, f := range over {
 		u := withAnthropic
 		f(&u)
-		if err := u.validate(1 << 40); err != ErrOutOfRange { //nolint:errorlint // validate returns the sentinel
+		if err := u.validate(1 << 40); !errors.Is(err, ErrOutOfRange) {
 			t.Errorf("anthropic case %d: validate = %v, want ErrOutOfRange", i, err)
 		}
 	}
@@ -95,7 +98,7 @@ func TestBreakdownsArePartsOfTheirParent(t *testing.T) {
 	} {
 		u := withResponses
 		f(&u)
-		if err := u.validate(1 << 40); err != ErrOutOfRange { //nolint:errorlint // validate returns the sentinel
+		if err := u.validate(1 << 40); !errors.Is(err, ErrOutOfRange) {
 			t.Errorf("responses case %d: validate = %v, want ErrOutOfRange", i, err)
 		}
 	}
