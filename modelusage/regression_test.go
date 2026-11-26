@@ -141,6 +141,15 @@ var regressionCases = []struct {
 		total: 11, class: classTrailing, cause: ErrMalformed},
 	{name: "event after the end marker", family: OpenAIChat, input: rcChatUsage + rcChatDone + rcChatUsage,
 		total: 11, class: classTrailing, cause: ErrMalformed},
+	// Chat chunk without total_tokens after one with total_tokens is consistent; a lower non-zero total is not.
+	{name: "chat chunk without total after chunk with total", family: OpenAIChat,
+		input: "data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"total_tokens\":15}}\n\n" +
+			rcChatUsage + rcChatDone,
+		total: 11, class: classFinal},
+	{name: "chat chunk with lower non-zero total", family: OpenAIChat,
+		input: "data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"total_tokens\":20}}\n\n" +
+			"data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":5,\"total_tokens\":15}}\n\n" + rcChatDone,
+		total: 15, class: classPartial, cause: ErrInconsistent},
 }
 
 func TestStreamRegressions(t *testing.T) {
@@ -172,8 +181,8 @@ func TestStreamRegressions(t *testing.T) {
 	}
 }
 
-// TestJSONRegressions holds the exact JSON replies. Three of them read as final although they describe a
-// problem the package does not detect yet; doc.go lists them under Known limits.
+// TestJSONRegressions holds the exact JSON replies for the fixed limits and the remaining total_tokens
+// upper-bound limit documented under Known limits in doc.go.
 func TestJSONRegressions(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -190,18 +199,64 @@ func TestJSONRegressions(t *testing.T) {
 			body: `{"usage":{"prompt_tokens":99999999999999999999,"completion_tokens":2}}`, err: ErrOutOfRange},
 		{name: "json byte order mark", family: Anthropic, body: "\ufeff{\"usage\":{\"input_tokens\":9,\"output_tokens\":2}}",
 			total: 11},
-		// Known limit: the status is not read.
+		// Issue 25: non-terminal Responses statuses are refused as truncated; terminal ones and absent status pass.
 		{name: "responses reply in progress", family: OpenAIResponses,
-			body: `{"status":"in_progress","usage":{"input_tokens":9,"output_tokens":2}}`, total: 11},
-		// Known limit: total_tokens is not checked against its parts.
-		{name: "chat total that contradicts its parts", family: OpenAIChat,
-			body: `{"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":20}}`, total: 11},
-		{name: "responses total that contradicts its parts", family: OpenAIResponses,
-			body: `{"usage":{"input_tokens":9,"output_tokens":2,"total_tokens":20}}`, total: 11},
-		// Known limit: compaction iterations are not counted.
+			body: `{"status":"in_progress","usage":{"input_tokens":9,"output_tokens":2}}`, err: ErrTruncated},
+		{name: "responses reply queued", family: OpenAIResponses,
+			body: `{"status":"queued","usage":{"input_tokens":9,"output_tokens":2}}`, err: ErrTruncated},
+		{name: "responses reply unknown status", family: OpenAIResponses,
+			body: `{"status":"pending","usage":{"input_tokens":9,"output_tokens":2}}`, err: ErrTruncated},
+		{name: "responses reply empty status", family: OpenAIResponses,
+			body: `{"status":"","usage":{"input_tokens":9,"output_tokens":2}}`, err: ErrTruncated},
+		{name: "responses reply non-string status", family: OpenAIResponses,
+			body: `{"status":123,"usage":{"input_tokens":9,"output_tokens":2}}`, err: ErrMalformed},
+		{name: "responses reply cancelled", family: OpenAIResponses,
+			body: `{"status":"cancelled","usage":{"input_tokens":9,"output_tokens":2}}`, total: 11},
+		{name: "responses reply completed", family: OpenAIResponses,
+			body: `{"status":"completed","usage":{"input_tokens":9,"output_tokens":2}}`, total: 11},
+		{name: "responses reply incomplete", family: OpenAIResponses,
+			body: `{"status":"incomplete","usage":{"input_tokens":9,"output_tokens":2}}`, total: 11},
+		{name: "responses reply failed", family: OpenAIResponses,
+			body: `{"status":"failed","usage":{"input_tokens":9,"output_tokens":2}}`, total: 11},
+		// Issue 24: total_tokens below input+output, negative, overflow or non-integer is refused;
+		// total_tokens of 0 next to non-zero parts is treated as absent; total_tokens above the sum is kept in
+		// ReportedTotalTokens.
+		{name: "chat total smaller than its parts", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":10}}`, err: ErrOutOfRange},
+		{name: "responses total smaller than its parts", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":9,"output_tokens":2,"total_tokens":10}}`, err: ErrOutOfRange},
+		{name: "chat total zero next to non-zero parts", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":0}}`, total: 11},
+		{name: "responses total zero next to non-zero parts", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":9,"output_tokens":2,"total_tokens":0}}`, total: 11},
+		{name: "chat total negative", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":-1}}`, err: ErrOutOfRange},
+		{name: "responses total overflow", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":9,"output_tokens":2,"total_tokens":99999999999999999999}}`, err: ErrOutOfRange},
+		{name: "chat total not an integer", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11.5}}`, err: ErrMalformed},
+		{name: "chat total larger than its parts", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":20}}`, total: 20},
+		{name: "responses total larger than its parts", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":9,"output_tokens":2,"total_tokens":20}}`, total: 20},
+		// Issue 26: Anthropic compaction and advisor_message iterations are counted; message, fallback_message
+		// and unknown entries are not double-counted.
 		{name: "anthropic compaction iterations", family: Anthropic,
 			body: `{"usage":{"input_tokens":9,"output_tokens":2,"iterations":[{"type":"message","input_tokens":9,` +
-				`"output_tokens":2},{"type":"compaction","input_tokens":8,"output_tokens":1}]}}`, total: 11},
+				`"output_tokens":2},{"type":"compaction","input_tokens":8,"output_tokens":1}]}}`, total: 20},
+		{name: "anthropic on-demand compaction", family: Anthropic,
+			body: `{"usage":{"input_tokens":0,"output_tokens":0,"iterations":[{"type":"compaction",` +
+				`"input_tokens":144,"output_tokens":276}]}}`, total: 420},
+		{name: "anthropic advisor documented example", family: Anthropic,
+			body: `{"usage":{"input_tokens":1760,"output_tokens":531,"cache_read_input_tokens":412,"iterations":[` +
+				`{"type":"advisor_message","input_tokens":823,"output_tokens":1612}]}}`, total: 5138},
+		{name: "anthropic unknown iteration type kept outside total", family: Anthropic,
+			body: `{"usage":{"input_tokens":1,"output_tokens":1,"iterations":[{"type":"advisor_message_v2",` +
+				`"input_tokens":5000,"output_tokens":5000}]}}`, total: 2},
+		{name: "anthropic compaction with fallback and unknown entry types", family: Anthropic,
+			body: `{"usage":{"input_tokens":9,"output_tokens":2,"iterations":[{"type":"compaction",` +
+				`"input_tokens":8,"output_tokens":1},{"type":"fallback_message","input_tokens":50,"output_tokens":10},` +
+				`{"type":"future_type","input_tokens":99,"output_tokens":99}]}}`, total: 20},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -247,6 +302,9 @@ func TestReaderReturnsAResultType(t *testing.T) {
 }
 
 func TestErrorText(t *testing.T) {
+	if strings.Contains(ErrTruncated.Error(), "stream") {
+		t.Errorf("ErrTruncated text %q mentions stream only, but ParseJSON returns it too", ErrTruncated.Error())
+	}
 	for _, err := range []error{new(PartialError), new(TrailingError), &PartialError{Err: ErrTruncated},
 		&TrailingError{Err: ErrMalformed}} {
 		if text := err.Error(); text == "" || !strings.HasPrefix(text, "modelusage: ") {

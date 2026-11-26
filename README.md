@@ -31,7 +31,7 @@
 
 | Package | What it is for | State |
 | --- | --- | --- |
-| [`modelusage`](modelusage) | Reading the token usage a model provider reports in a reply (Anthropic Messages, OpenAI chat completions and Responses), complete or streamed, within byte limits the caller sets, with cache and reasoning tokens counted once | Available |
+| [`modelusage`](modelusage) | Reading the token usage a model provider reports in a reply (Anthropic Messages, OpenAI chat completions and Responses), complete or streamed, within byte limits the caller sets, with cache, reasoning, compaction and advisor tokens counted once | Available |
 | Redaction | Hiding known secret forms in text from outside a product, in bounded time, before the text reaches a model, storage, logs or a person | Planned, next |
 | Hygiene checks | Checks a repository runs before publishing: emails, local paths and key-shaped literals in tracked files | Planned |
 | Audit chain | Chained audit records, so that an edit, a removed row or a truncated tail is detected | Planned |

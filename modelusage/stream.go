@@ -24,21 +24,27 @@ import (
 //
 //   - [Anthropic]: message_start carries the first usage block in message.usage and each message_delta a
 //     cumulative one. Each count takes the latest value present in a block, as the vendor's own accumulator
-//     does; a count absent or null keeps its earlier value. A count lower than its earlier value is a
-//     contradiction: the counts take the new values and the parse stops with [ErrInconsistent]. The final event
-//     is message_stop. After it, ping events and events of types the parser does not know are allowed, since
-//     the provider may send ping at any point and add event types; any other event is a trailing problem.
+//     does; a count absent or null keeps its earlier value. When usage.iterations is present and non-null, its
+//     compaction, advisor_message and unclassified iteration sums replace the accumulated sums (an omitted or
+//     null iterations field leaves earlier iteration sums intact; an empty array or one omitting an earlier
+//     category drops that sum to zero and stops with [ErrInconsistent]). A count lower than its earlier value
+//     is a contradiction: the counts take the new values and the parse stops with [ErrInconsistent]. The final
+//     event is message_stop. After it, ping events and events of types the parser does not know are allowed,
+//     since the provider may send ping at any point and add event types; any other event is a trailing problem.
 //   - [OpenAIChat]: OpenAI sends one chunk with a non-null usage field (stream_options.include_usage), the
 //     last before data: [DONE]; some compatible servers send cumulative usage on every chunk. The latest
 //     complete block is the usage, as a whole and never mixed count by count. A block with no count lower than
-//     in the block before is consistent, so growing blocks are a normal stream; a block with any lower count
-//     is a contradiction: the usage becomes the new block and the parse stops with ErrInconsistent. The final
-//     event is data whose whole text is [DONE]. Chat chunks do not use the type member, so it is not read. A
-//     chunk with an error member ends the stream as truncated, after its usage, if any, is taken. Nothing is
-//     allowed after [DONE].
+//     in the block before is consistent, so growing blocks are a normal stream; ReportedTotalTokens is compared
+//     only when the later block carries a non-zero total_tokens, so a chunk without total_tokens after one with
+//     it is not a contradiction. A block with any lower count is a contradiction: the usage becomes the new block
+//     and the parse stops with ErrInconsistent. The final event is data whose whole text is [DONE]. Chat chunks
+//     do not use the type member, so it is not read. A chunk with an error member ends the stream as truncated,
+//     after its usage, if any, is taken. Nothing is allowed after [DONE].
 //   - [OpenAIResponses]: the usage is response.usage of the final event, one of response.completed,
-//     response.incomplete or response.failed, and nothing else. After it, one data: [DONE], which servers that
-//     copy chat completions send, and events other than a final or error event are allowed.
+//     response.incomplete or response.failed, and nothing else. If response.status is present and non-null, it
+//     must be terminal (completed, incomplete, failed or cancelled); otherwise the parse stops with
+//     [ErrTruncated]. After the final event, one data: [DONE], which servers that copy chat completions send,
+//     and events other than a final or error event are allowed.
 //
 // The parse stops at the first problem. The error then tells how to use the [Usage]:
 //
@@ -374,7 +380,7 @@ func (p *streamParser) anthropicEvent(data []byte) {
 			p.report(ErrMalformed)
 			return
 		}
-		block, err := usageMember(ev.message)
+		block, err := topUsageMember(ev.message, false)
 		switch {
 		case err != nil:
 			p.report(err)
@@ -418,20 +424,38 @@ func (p *streamParser) mergeAnthropic(v []byte) {
 	if au == nil {
 		return
 	}
-	from := au.counts()
-	if err := firstErr(from...); err != nil {
+	if err := firstErr(au.counts()...); err != nil {
 		p.report(err)
+		return
+	}
+	if au.ignoredMax.n > p.lim.MaxTokens {
+		p.report(ErrOutOfRange)
 		return
 	}
 	next := p.acc
 	present, lower := false, false
-	for i, to := range next.counts() {
-		if !from[i].set {
+	fromTop := au.topCounts()
+	for i, to := range next.topCounts() {
+		if !fromTop[i].set {
 			continue
 		}
 		present = true
-		lower = lower || (to.set && from[i].n < to.n)
-		*to = *from[i]
+		lower = lower || (to.set && fromTop[i].n < to.n)
+		*to = *fromTop[i]
+	}
+	if au.iterationsSet {
+		fromIter := au.iterationCounts()
+		for i, to := range next.iterationCounts() {
+			switch {
+			case to.set && fromIter[i].n < to.n:
+				present = true
+				lower = true
+				*to = count{n: fromIter[i].n, set: true}
+			case fromIter[i].set:
+				present = true
+				*to = *fromIter[i]
+			}
+		}
 	}
 	if !present {
 		return
@@ -500,7 +524,7 @@ func (p *streamParser) responsesEvent(data []byte) {
 			p.report(ErrMalformed)
 			return
 		}
-		block, err := usageMember(ev.response)
+		block, err := topUsageMember(ev.response, true)
 		if err != nil {
 			p.report(err)
 			return
@@ -521,20 +545,34 @@ func (p *streamParser) responsesEvent(data []byte) {
 	}
 }
 
-// anyLower reports whether any count of next is lower than the same count of prev.
+// anyLower reports whether any count of next is lower than the same count of prev. ReportedTotalTokens is
+// compared only when next carries a non-zero value, so a chunk without total_tokens after one with total_tokens
+// is not treated as a contradiction.
 func anyLower(next, prev Usage) bool {
 	a := [...]int64{next.InputTokens, next.OutputTokens, next.CacheCreationInputTokens,
 		next.CacheCreation5mInputTokens, next.CacheCreation1hInputTokens, next.CacheReadInputTokens,
 		next.CachedPromptTokens, next.CacheWritePromptTokens, next.CacheWrite30mPromptTokens,
-		next.CacheWrite12hPromptTokens, next.ReasoningTokens}
+		next.CacheWrite12hPromptTokens, next.ReasoningTokens, next.CompactionInputTokens,
+		next.CompactionOutputTokens, next.CompactionCacheCreationInputTokens,
+		next.CompactionCacheCreation5mInputTokens, next.CompactionCacheCreation1hInputTokens,
+		next.CompactionCacheReadInputTokens, next.AdvisorInputTokens, next.AdvisorOutputTokens,
+		next.AdvisorCacheCreationInputTokens, next.AdvisorCacheCreation5mInputTokens,
+		next.AdvisorCacheCreation1hInputTokens, next.AdvisorCacheReadInputTokens,
+		next.UnclassifiedIterationInputTokens, next.UnclassifiedIterationOutputTokens}
 	b := [...]int64{prev.InputTokens, prev.OutputTokens, prev.CacheCreationInputTokens,
 		prev.CacheCreation5mInputTokens, prev.CacheCreation1hInputTokens, prev.CacheReadInputTokens,
 		prev.CachedPromptTokens, prev.CacheWritePromptTokens, prev.CacheWrite30mPromptTokens,
-		prev.CacheWrite12hPromptTokens, prev.ReasoningTokens}
+		prev.CacheWrite12hPromptTokens, prev.ReasoningTokens, prev.CompactionInputTokens,
+		prev.CompactionOutputTokens, prev.CompactionCacheCreationInputTokens,
+		prev.CompactionCacheCreation5mInputTokens, prev.CompactionCacheCreation1hInputTokens,
+		prev.CompactionCacheReadInputTokens, prev.AdvisorInputTokens, prev.AdvisorOutputTokens,
+		prev.AdvisorCacheCreationInputTokens, prev.AdvisorCacheCreation5mInputTokens,
+		prev.AdvisorCacheCreation1hInputTokens, prev.AdvisorCacheReadInputTokens,
+		prev.UnclassifiedIterationInputTokens, prev.UnclassifiedIterationOutputTokens}
 	for i := range a {
 		if a[i] < b[i] {
 			return true
 		}
 	}
-	return false
+	return next.ReportedTotalTokens != 0 && next.ReportedTotalTokens < prev.ReportedTotalTokens
 }
