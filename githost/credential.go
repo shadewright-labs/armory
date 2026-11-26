@@ -8,8 +8,11 @@ type Scope struct {
 	Write bool
 }
 
-// Credential returns a token for one request. A client asks for a token before each request and does
-// not keep it; caching and refresh are the credential's business. When a client wraps an error of a
+// Credential returns a token for one attempt of a request. A client asks for a token before each
+// attempt, retries included, and does not keep it, so a token refreshed between attempts is the one
+// sent; caching and refresh are the credential's business. An error on a retry after an attempt of a
+// write that may have reached the host also matches [ErrOutcomeUnknown]. A delay a Credential asks for
+// in a [RetryableError] is capped like one the host asks for. When a client wraps an error of a
 // Credential it keeps only its class (canceled, deadline, retryable, not found, forbidden, unauthorized),
 // never its text.
 type Credential interface {

@@ -49,8 +49,7 @@ type RepoRef struct {
 	Name    string // repository name
 	// ID is the host's immutable repository ID (GitHub numeric ID, Azure DevOps GUID). It is
 	// configuration: the product supplies it with the names, and a client never learns it from the host.
-	// A client verifies it against the host, and compares it with every answer that carries one; an
-	// answer for another repository, such as one renamed or recreated under the same name, is
-	// ErrUntrustedAnswer.
+	// It is carried for the typed calls, which will compare it with the host's answers; nothing in this
+	// module checks it yet. The transport only passes the RepoRef to the Credential in a [Scope].
 	ID string
 }

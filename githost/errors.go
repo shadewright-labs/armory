@@ -16,7 +16,8 @@ var (
 	// plain ErrNotFound, never changes for the same commit and path.
 	ErrPathNotInTree = fmt.Errorf("path not in tree: %w", ErrNotFound)
 	// ErrConflict means the request was based on stale state: the head moved, the branch exists at another
-	// commit, the pull request is merged, or an Expect field did not match. The caller reads state again.
+	// commit, the pull request is merged, or a precondition the request carried, such as an expected old
+	// value, did not hold. The caller reads state again.
 	ErrConflict = errors.New("conflict")
 	// ErrForbidden means the identity lacks a permission, or a rule or policy of the host refused the
 	// request. A rate limit is never ErrForbidden but a [RetryableError].
@@ -43,13 +44,19 @@ var (
 	// ErrOutcomeUnknown means an attempt of a write may have reached the host and its answer was lost or
 	// was a failure that does not say the write was refused (a network error, a timeout, 408 or 5xx).
 	// Every later failure in the same call (a refused check, a credential error, the end of the context,
-	// a status, the last retry) keeps this kind next to its own, so a caller never reads it as "nothing
-	// was written". It never matches ErrRetryable: the caller reads state, then decides.
+	// a status, the last retry, an unusable receipt) keeps this kind next to its own, so a caller never
+	// reads it as "nothing was written". It never matches ErrRetryable: the caller reads state, then
+	// decides.
 	ErrOutcomeUnknown = errors.New("outcome of the write unknown")
 	// ErrUnusableReceipt means the host accepted a write (a 2xx answer) and the answer could not be used:
-	// it was past the bound, could not be read to the end, or could not be decoded. The write happened;
-	// what it created or changed is not known. It is never retried and never matches ErrOutcomeUnknown:
-	// the caller reads state to learn the result and must not send the write again.
+	// it was past the bound, could not be read to the end, or could not be decoded. That attempt's write
+	// happened; what it created or changed is not known. It is never retried, and the caller reads state
+	// to learn the result and must not send the write again.
+	//
+	// When an earlier attempt of the same call may have reached the host, the error matches
+	// ErrOutcomeUnknown too: at least one write was accepted, and whether the earlier one was also
+	// applied is unknown, so a write that is not idempotent may have happened twice. Without such an
+	// attempt it does not match ErrOutcomeUnknown.
 	ErrUnusableReceipt = errors.New("write accepted, answer unusable")
 	// ErrRetryable means a transient failure: the same request may succeed later. [*RetryableError]
 	// matches it.

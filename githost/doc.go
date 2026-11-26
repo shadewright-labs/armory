@@ -2,7 +2,7 @@
 //
 // A client is bound to one repository ([RepoRef]) when it is built. It holds no credential and decides
 // nothing about what a caller may do: the product supplies a [Credential], which hands out a [Token] for
-// each request.
+// each attempt of a request.
 //
 // A [Token] prints, formats and marshals as a fixed placeholder with every verb and encoder. Nothing
 // exported returns its value: only the module's own transport writes it into a request header, after
@@ -16,7 +16,8 @@
 //
 // A write whose attempt may have reached the host and whose answer was lost matches [ErrOutcomeUnknown]
 // with every later failure of the same call; a write the host accepted whose answer could not be used
-// matches [ErrUnusableReceipt]. Neither is retried, and neither means that nothing was written.
+// matches [ErrUnusableReceipt], and [ErrOutcomeUnknown] as well when an earlier attempt may have written
+// too. Neither is retried, and neither means that nothing was written.
 //
 // This package holds types only. It has no Reader or Writer interface, no host client and no exported
 // write check yet: those are still being designed. It does not read files, environment variables or
