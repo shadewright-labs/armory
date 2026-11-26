@@ -90,6 +90,9 @@ func TestParseStreamFixtures(t *testing.T) {
 			want: Usage{Family: Anthropic, InputTokens: 25, OutputTokens: 15}},
 		{file: "anthropic-stream-error.sse", family: Anthropic, wantErr: ErrTruncated,
 			want: Usage{Family: Anthropic, InputTokens: 25, OutputTokens: 1}},
+		// An error event ends the reply even when a message_stop follows it: the error wins.
+		{file: "anthropic-stream-error-then-stop.sse", family: Anthropic, wantErr: ErrTruncated,
+			want: Usage{Family: Anthropic, InputTokens: 25, OutputTokens: 1}},
 		{file: "chat-stream.sse", family: OpenAIChat, want: Usage{Family: OpenAIChat, InputTokens: 1200,
 			OutputTokens: 42, CachedPromptTokens: 1024}},
 		// Usage on every chunk: the last one wins, as each reports the whole request so far.
@@ -331,13 +334,26 @@ func TestReaderErrorIsWrapped(t *testing.T) {
 	}
 }
 
-// infiniteReader never ends, so a parser that read without a bound would never return.
-type infiniteReader struct{ n int64 }
+// errReadPastLimit ends a parse that asked a limitReader for more than it may read.
+var errReadPastLimit = errors.New("read past the limit")
 
-func (r *infiniteReader) Read(p []byte) (int, error) {
+// limitReader never ends on its own. It fails the test, and returns an error so that the parse ends, when it
+// is asked for a byte past max+1 or for zero bytes, which a parser that lost its bound would do forever.
+type limitReader struct {
+	t   *testing.T
+	n   int64
+	max int64
+}
+
+func (r *limitReader) Read(p []byte) (int, error) {
+	if len(p) == 0 || r.n >= r.max+1 {
+		r.t.Errorf("read asked for %d bytes after %d, limit %d", len(p), r.n, r.max)
+		return 0, errReadPastLimit
+	}
+	p = p[:min(int64(len(p)), r.max+1-r.n)]
 	for i := range p {
 		p[i] = ' '
-		if i%50 == 49 {
+		if (r.n+int64(i))%50 == 49 {
 			p[i] = '\n'
 		}
 	}
@@ -348,12 +364,12 @@ func (r *infiniteReader) Read(p []byte) (int, error) {
 func TestReadingIsBounded(t *testing.T) {
 	lim := Limits{MaxBytes: 1 << 16, MaxLineBytes: 1 << 10, MaxTokens: 100}
 	for _, parse := range []func(Family, io.Reader, Limits) (Usage, error){ParseJSON, ParseStream} {
-		r := &infiniteReader{}
+		r := &limitReader{t: t, max: lim.MaxBytes}
 		if _, err := parse(OpenAIChat, r, lim); !errors.Is(err, ErrTooLarge) {
 			t.Errorf("err = %v, want ErrTooLarge", err)
 		}
-		if r.n > lim.MaxBytes+1 {
-			t.Errorf("read %d bytes, limit %d", r.n, lim.MaxBytes)
+		if r.n != lim.MaxBytes+1 {
+			t.Errorf("read %d bytes, want the limit %d and one more", r.n, lim.MaxBytes)
 		}
 	}
 }
