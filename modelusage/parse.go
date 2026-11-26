@@ -12,9 +12,10 @@ import (
 // ParseJSON reads a complete JSON reply of family f from r and returns its usage. It reads at most
 // lim.MaxBytes bytes and one more to tell a reply of exactly that size from a longer one.
 //
-// A byte order mark at the start is skipped. The reply must be one JSON object with a top-level usage block holding both the input and the output
-// count of the family: input_tokens and output_tokens (Anthropic, Responses) or prompt_tokens and
-// completion_tokens (chat completions). Other counts are optional and absent or null ones are zero.
+// A byte order mark at the start is skipped. The reply must be one JSON object with a top-level usage block
+// holding both the input and the output count of the family: input_tokens and output_tokens (Anthropic,
+// Responses) or prompt_tokens and completion_tokens (chat completions). Other counts are optional and absent
+// or null ones are zero.
 //
 // Errors: ErrInvalidLimits, a *LimitError matching ErrTooLarge, ErrMalformed, ErrNoUsage, ErrOutOfRange, or
 // the reader's own error wrapped. On error the Usage is zero.

@@ -58,8 +58,9 @@ func TestFamilyString(t *testing.T) {
 	}
 }
 
-// TestBreakdownsArePartsOfTheirParent checks that a breakdown never adds to the totals and that validate
-// refuses a breakdown whose sum is larger than its parent count.
+// TestBreakdownsArePartsOfTheirParent checks that a breakdown never adds to the totals, that validate refuses
+// a breakdown larger than a parent the reference bounds it by, and that it accepts the cache write lifetimes
+// as reported.
 func TestBreakdownsArePartsOfTheirParent(t *testing.T) {
 	anthropic := Usage{Family: Anthropic, InputTokens: 50, OutputTokens: 500, CacheCreationInputTokens: 248,
 		CacheReadInputTokens: 1800}
@@ -80,26 +81,34 @@ func TestBreakdownsArePartsOfTheirParent(t *testing.T) {
 			t.Errorf("validate(%+v) = %v, want nil", b, err)
 		}
 	}
-	over := []func(*Usage){
-		func(u *Usage) { u.CacheCreation5mInputTokens++ },
-		func(u *Usage) { u.CacheCreation1hInputTokens++ },
-		func(u *Usage) { u.ReasoningTokens = u.OutputTokens + 1 },
+	// Above their parent: the thinking, reasoning and cache tokens are refused, the cache write lifetimes are
+	// reported as given.
+	tests := []struct {
+		name   string
+		u      Usage
+		change func(*Usage)
+		ok     bool
+	}{
+		{name: "thinking above output", u: withAnthropic, change: func(u *Usage) { u.ReasoningTokens = u.OutputTokens + 1 }},
+		{name: "reasoning above output", u: withResponses,
+			change: func(u *Usage) { u.ReasoningTokens = u.OutputTokens + 1 }},
+		{name: "cache reads and writes above input", u: withResponses,
+			change: func(u *Usage) { u.CachedPromptTokens = u.InputTokens }},
+		{name: "5m lifetime above writes", u: withAnthropic, change: func(u *Usage) { u.CacheCreation5mInputTokens++ },
+			ok: true},
+		{name: "1h lifetime without writes", u: withAnthropic, change: func(u *Usage) { u.CacheCreationInputTokens = 0 },
+			ok: true},
+		{name: "30m lifetime above writes", u: withResponses, change: func(u *Usage) { u.CacheWrite30mPromptTokens++ },
+			ok: true},
+		{name: "12h lifetime without writes", u: withResponses, change: func(u *Usage) { u.CacheWritePromptTokens = 0 },
+			ok: true},
 	}
-	for i, f := range over {
-		u := withAnthropic
-		f(&u)
-		if err := u.validate(1 << 40); !errors.Is(err, ErrOutOfRange) {
-			t.Errorf("anthropic case %d: validate = %v, want ErrOutOfRange", i, err)
-		}
-	}
-	for i, f := range []func(*Usage){
-		func(u *Usage) { u.CacheWrite30mPromptTokens++ },
-		func(u *Usage) { u.CacheWrite12hPromptTokens++ },
-	} {
-		u := withResponses
-		f(&u)
-		if err := u.validate(1 << 40); !errors.Is(err, ErrOutOfRange) {
-			t.Errorf("responses case %d: validate = %v, want ErrOutOfRange", i, err)
+	for _, tt := range tests {
+		u := tt.u
+		tt.change(&u)
+		err := u.validate(1 << 40)
+		if tt.ok != (err == nil) || (err != nil && !errors.Is(err, ErrOutOfRange)) {
+			t.Errorf("%s: validate = %v, want nil: %v", tt.name, err, tt.ok)
 		}
 	}
 }

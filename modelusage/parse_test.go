@@ -167,13 +167,16 @@ func TestParseJSONInline(t *testing.T) {
 				`"cache_creation":{"ephemeral_5m_input_tokens":6,"ephemeral_1h_input_tokens":4}}}`,
 			want: Usage{Family: Anthropic, InputTokens: 1, OutputTokens: 2, CacheCreationInputTokens: 10,
 				CacheCreation5mInputTokens: 6, CacheCreation1hInputTokens: 4}},
+		// Neither reference bounds the lifetimes by the cache writes, so they are reported as given, and the
+		// writes are not made up from them when absent.
 		{name: "anthropic cache write lifetimes above the writes", family: Anthropic,
 			body: `{"usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":10,` +
 				`"cache_creation":{"ephemeral_5m_input_tokens":6,"ephemeral_1h_input_tokens":5}}}`,
-			wantErr: ErrOutOfRange},
+			want: Usage{Family: Anthropic, InputTokens: 1, OutputTokens: 2, CacheCreationInputTokens: 10,
+				CacheCreation5mInputTokens: 6, CacheCreation1hInputTokens: 5}},
 		{name: "anthropic cache write lifetimes without the writes", family: Anthropic,
-			body:    `{"usage":{"input_tokens":1,"output_tokens":2,"cache_creation":{"ephemeral_1h_input_tokens":5}}}`,
-			wantErr: ErrOutOfRange},
+			body: `{"usage":{"input_tokens":1,"output_tokens":2,"cache_creation":{"ephemeral_1h_input_tokens":5}}}`,
+			want: Usage{Family: Anthropic, InputTokens: 1, OutputTokens: 2, CacheCreation1hInputTokens: 5}},
 		{name: "anthropic cache_creation not an object", family: Anthropic,
 			body: `{"usage":{"input_tokens":1,"output_tokens":2,"cache_creation":3}}`, wantErr: ErrMalformed},
 		{name: "anthropic thinking above output", family: Anthropic,
@@ -194,7 +197,12 @@ func TestParseJSONInline(t *testing.T) {
 		{name: "responses cache write lifetimes above the writes", family: OpenAIResponses,
 			body: `{"usage":{"input_tokens":20,"output_tokens":2,"input_tokens_details":{"cache_write_tokens":10,` +
 				`"cache_write_tokens_details":{"ttl_30m_tokens":3,"ttl_12h_tokens":8}}}}`,
-			wantErr: ErrOutOfRange},
+			want: Usage{Family: OpenAIResponses, InputTokens: 20, OutputTokens: 2, CacheWritePromptTokens: 10,
+				CacheWrite30mPromptTokens: 3, CacheWrite12hPromptTokens: 8}},
+		{name: "responses cache write lifetimes without the writes", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":20,"output_tokens":2,` +
+				`"input_tokens_details":{"cache_write_tokens_details":{"ttl_30m_tokens":4}}}}`,
+			want: Usage{Family: OpenAIResponses, InputTokens: 20, OutputTokens: 2, CacheWrite30mPromptTokens: 4}},
 		// The chat reference has no cache_write_tokens_details, so it is not read there.
 		{name: "chat cache write lifetimes not read", family: OpenAIChat,
 			body: `{"usage":{"prompt_tokens":20,"completion_tokens":2,"prompt_tokens_details":{"cache_write_tokens":10,` +
@@ -354,6 +362,23 @@ func TestParseStreamInline(t *testing.T) {
 				"\"output_tokens_details\":{\"thinking_tokens\":4}}}\n\n" + stop,
 			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9, CacheCreationInputTokens: 30,
 				CacheCreation5mInputTokens: 10, CacheCreation1hInputTokens: 20, ReasoningTokens: 4}},
+		// The lifetimes come in message_start and the cache writes, cumulative, in a later message_delta.
+		{name: "cache write lifetimes before their writes", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
+				"\"cache_creation\":{\"ephemeral_1h_input_tokens\":20}}}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9,\"cache_creation_input_tokens\":20}}\n\n" +
+				stop,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9, CacheCreationInputTokens: 20,
+				CacheCreation1hInputTokens: 20}},
+		{name: "cache write lifetimes without writes", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
+				"\"cache_creation\":{\"ephemeral_5m_input_tokens\":4}}}}\n\n" + delta + stop,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9, CacheCreation5mInputTokens: 4}},
+		// The thinking tokens are checked against the output once, at the final event, not between updates.
+		{name: "thinking before its output", family: Anthropic,
+			body: start + "data: {\"type\":\"message_delta\"," +
+				"\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":8}}}\n\n" + delta + stop,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9, ReasoningTokens: 8}},
 		{name: "thinking above output across events", family: Anthropic,
 			body: start + "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9," +
 				"\"output_tokens_details\":{\"thinking_tokens\":10}}}\n\n" + stop,

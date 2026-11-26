@@ -53,14 +53,25 @@ func (f Family) String() string {
 //     lifetimes stay zero.
 //
 // A breakdown is a part of its parent count and never adds to a total. A provider may leave part of a
-// parent without a breakdown (an older model, or a field it does not send): the lifetimes of the cache
-// writes then sum to less than the writes, and the rest has no known lifetime. A breakdown that sums to
-// more than its parent is refused as ErrOutOfRange rather than accepted as reported, because both
-// references define it as a part of the parent, and a price per lifetime taken from it would charge more
-// than the parent the provider bills.
+// parent without a breakdown (an older model, or a field it does not send).
 //
-// A parser never returns a Usage that breaks these rules: the parts are never larger than their whole, and
-// every count and total is within the caller's [Limits.MaxTokens].
+// A breakdown is checked against its parent only where the provider's reference bounds it and the parent is
+// present: cached_tokens and cache_write_tokens within the OpenAI prompt ("a detailed breakdown of the input
+// tokens"), reasoning_tokens within the OpenAI output ("a detailed breakdown of the output tokens"), and
+// Anthropic's thinking_tokens within output_tokens ("Always <= output_tokens"). A larger one is
+// ErrOutOfRange. In an Anthropic stream that check runs once, on the counts at message_stop, never between
+// two events that update the part and the whole.
+//
+// The cache write lifetimes are reported as given and never checked: neither reference says they sum to at
+// most the cache writes (Anthropic calls cache_creation a "breakdown of cached tokens by TTL", and the
+// Responses API describes ttl_30m_tokens and ttl_12h_tokens only as tokens written with that retention), and
+// Anthropic sends them in message_start while the cumulative cache writes may change in a later event. They
+// can therefore sum to more than CacheCreationInputTokens or CacheWritePromptTokens, or be set while that
+// count is absent and zero; the count is never made up from them. A caller pricing by lifetime should cap
+// the lifetimes at the cache writes, or price the writes as a whole.
+//
+// A parser never returns a Usage that breaks these rules, and every count and total is within the caller's
+// [Limits.MaxTokens].
 type Usage struct {
 	// Family is the reply format the counts were read from.
 	Family Family
@@ -454,9 +465,9 @@ func openAIOf(ou *openAIUsage, f Family, maxTokens int64) (Usage, error) {
 	return u, nil
 }
 
-// validate checks every count and total against maxTokens, and that no part is larger than its whole: the
-// cache reads and writes within an OpenAI prompt, each lifetime breakdown within its cache writes, and the
-// reasoning tokens within the output.
+// validate checks every count and total against maxTokens, and that a part the provider's reference bounds by
+// its whole is no larger: the cache reads and writes within an OpenAI prompt, and the reasoning or thinking
+// tokens within the output. The cache write lifetimes are not checked (see Usage).
 func (u Usage) validate(maxTokens int64) error {
 	for _, n := range []int64{u.InputTokens, u.OutputTokens, u.CacheCreationInputTokens,
 		u.CacheCreation5mInputTokens, u.CacheCreation1hInputTokens, u.CacheReadInputTokens, u.CachedPromptTokens,
@@ -470,10 +481,6 @@ func (u Usage) validate(maxTokens int64) error {
 		return ErrOutOfRange
 	}
 	if u.CachedPromptTokens+u.CacheWritePromptTokens > u.InputTokens && u.Family != Anthropic {
-		return ErrOutOfRange
-	}
-	if u.CacheCreation5mInputTokens+u.CacheCreation1hInputTokens > u.CacheCreationInputTokens ||
-		u.CacheWrite30mPromptTokens+u.CacheWrite12hPromptTokens > u.CacheWritePromptTokens {
 		return ErrOutOfRange
 	}
 	if u.ReasoningTokens > u.OutputTokens {
