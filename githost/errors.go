@@ -38,11 +38,19 @@ var (
 	// ErrInvalidConfig means the input a client is built from cannot be used. It is permanent.
 	ErrInvalidConfig = errors.New("invalid configuration")
 	// ErrStoppedBeforeWrite means the product's check before a write refused it: nothing more was sent in
-	// the call. Neither the check's text nor its error is kept.
+	// the call. Neither the check's text nor its error is kept; a valid [Refusal] class is.
 	ErrStoppedBeforeWrite = errors.New("stopped before the write")
-	// ErrOutcomeUnknown means a write that is not idempotent was sent and its answer was lost. It is not
-	// repeated in the call: the caller reads state, then decides.
+	// ErrOutcomeUnknown means an attempt of a write may have reached the host and its answer was lost or
+	// was a failure that does not say the write was refused (a network error, a timeout, 408 or 5xx).
+	// Every later failure in the same call (a refused check, a credential error, the end of the context,
+	// a status, the last retry) keeps this kind next to its own, so a caller never reads it as "nothing
+	// was written". It never matches ErrRetryable: the caller reads state, then decides.
 	ErrOutcomeUnknown = errors.New("outcome of the write unknown")
+	// ErrUnusableReceipt means the host accepted a write (a 2xx answer) and the answer could not be used:
+	// it was past the bound, could not be read to the end, or could not be decoded. The write happened;
+	// what it created or changed is not known. It is never retried and never matches ErrOutcomeUnknown:
+	// the caller reads state to learn the result and must not send the write again.
+	ErrUnusableReceipt = errors.New("write accepted, answer unusable")
 	// ErrRetryable means a transient failure: the same request may succeed later. [*RetryableError]
 	// matches it.
 	ErrRetryable = errors.New("retryable")
@@ -94,3 +102,40 @@ func (e *RetryableError) Unwrap() error { return e.Err }
 
 // Is reports whether target is [ErrRetryable].
 func (e *RetryableError) Is(target error) bool { return target == ErrRetryable }
+
+// maxRefusalClass bounds the length of a [Refusal] class.
+const maxRefusalClass = 32
+
+// Refusal lets a product's check before a write say which of its own refusals stopped the write, such
+// as "paused" or "blocked", without free text. The check returns a *Refusal, alone or wrapped; when its
+// Class is valid, the client's error (which matches [ErrStoppedBeforeWrite]) carries a new *Refusal with
+// that class, found with [errors.As]. Nothing else of the check's error is kept, and an invalid class
+// is dropped.
+//
+// Provisional: it belongs to the check before a write, whose name and shape are still being designed.
+type Refusal struct {
+	// Class is a short constant the product chose: 1 to 32 lowercase ASCII letters, digits and dashes.
+	Class string
+}
+
+// Error returns "refused" and the class when it is valid.
+func (r *Refusal) Error() string {
+	if r.Valid() {
+		return "refused: " + r.Class
+	}
+	return "refused"
+}
+
+// Valid reports whether the class is 1 to 32 lowercase ASCII letters, digits and dashes.
+func (r *Refusal) Valid() bool {
+	if r == nil || r.Class == "" || len(r.Class) > maxRefusalClass {
+		return false
+	}
+	for i := range len(r.Class) {
+		c := r.Class[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return false
+		}
+	}
+	return true
+}

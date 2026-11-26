@@ -12,8 +12,9 @@ const (
 // ObjectID is a full Git object ID: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters.
 type ObjectID string
 
-// Valid reports whether id is a full object ID. Branch names, short IDs and uppercase IDs are never
-// accepted.
+// Valid reports whether id is a full object ID of an object. Branch names, short IDs, uppercase IDs and
+// the all-zero ID are never accepted: hosts read the all-zero ID as "no object", which creates or
+// deletes a ref.
 func (id ObjectID) Valid() bool {
 	if len(id) != 40 && len(id) != 64 {
 		return false
@@ -21,6 +22,19 @@ func (id ObjectID) Valid() bool {
 	for i := range len(id) {
 		c := id[i]
 		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return !id.IsZero()
+}
+
+// IsZero reports whether id is the all-zero ID of either length, which names no object.
+func (id ObjectID) IsZero() bool {
+	if len(id) != 40 && len(id) != 64 {
+		return false
+	}
+	for i := range len(id) {
+		if id[i] != '0' {
 			return false
 		}
 	}
@@ -33,7 +47,10 @@ type RepoRef struct {
 	Owner   string // GitHub owner, or Azure DevOps organization
 	Project string // Azure DevOps project; empty on GitHub
 	Name    string // repository name
-	// ID is the host's immutable repository ID (GitHub numeric ID, Azure DevOps GUID), read once and
-	// compared with every answer that carries one. An answer for another repository is ErrUntrustedAnswer.
+	// ID is the host's immutable repository ID (GitHub numeric ID, Azure DevOps GUID). It is
+	// configuration: the product supplies it with the names, and a client never learns it from the host.
+	// A client verifies it against the host, and compares it with every answer that carries one; an
+	// answer for another repository, such as one renamed or recreated under the same name, is
+	// ErrUntrustedAnswer.
 	ID string
 }

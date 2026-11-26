@@ -3,6 +3,7 @@ package githost
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,7 +16,7 @@ const (
 func TestErrorKinds(t *testing.T) {
 	all := []error{ErrNotFound, ErrPathNotInTree, ErrConflict, ErrForbidden, ErrUnauthorized, ErrRejected,
 		ErrTooLarge, ErrInvalidEntry, ErrUntrustedAnswer, ErrUnsupported, ErrInvalidConfig,
-		ErrStoppedBeforeWrite, ErrOutcomeUnknown, ErrRetryable}
+		ErrStoppedBeforeWrite, ErrOutcomeUnknown, ErrUnusableReceipt, ErrRetryable}
 	cases := []struct {
 		name string
 		err  error
@@ -74,5 +75,39 @@ func TestErrorText(t *testing.T) {
 		if got := c.err.Error(); got != c.want {
 			t.Errorf("Error() = %q, want %q", got, c.want)
 		}
+	}
+}
+
+func TestRefusalValid(t *testing.T) {
+	cases := map[string]bool{
+		"paused":                true,
+		"blocked":               true,
+		"policy-7":              true,
+		"0":                     true,
+		strings.Repeat("a", 32): true,
+		strings.Repeat("a", 33): false,
+		"":                      false,
+		"Paused":                false,
+		"has space":             false,
+		"under_score":           false,
+		"line\nbreak":           false,
+		"dot.ted":               false,
+		"https://example.test":  false,
+		"caf\u00e9":             false,
+	}
+	for class, want := range cases {
+		if got := (&Refusal{Class: class}).Valid(); got != want {
+			t.Errorf("Refusal{%q}.Valid() = %v, want %v", class, got, want)
+		}
+	}
+	var nilRefusal *Refusal
+	if nilRefusal.Valid() {
+		t.Error("a nil Refusal is valid")
+	}
+	if got := (&Refusal{Class: "paused"}).Error(); got != "refused: paused" {
+		t.Errorf("Error() = %q", got)
+	}
+	if got := (&Refusal{Class: "Not A Class"}).Error(); got != "refused" {
+		t.Errorf("Error() of an invalid class = %q, want the fixed text only", got)
 	}
 }
