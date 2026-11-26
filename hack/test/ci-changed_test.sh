@@ -10,7 +10,7 @@ work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
 fails=0 n=0
 
-test_email="detector-test@example.invalid"
+test_email="detector-test@example.com"
 git_q() { git -c user.name=test -c user.email="${test_email}" -c commit.gpgsign=false "$@"; }
 
 # new_repo: a repository whose base commit holds a package, its testdata, docs and a workflow.

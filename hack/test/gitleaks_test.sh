@@ -16,7 +16,7 @@ gitleaks="${1:-gitleaks}"
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
 fails=0 n=0
-test_email="scan-test@example.invalid"
+test_email="scan-test@example.com"
 
 alnum() { head -c "$1" < <(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom); }
 git_q() { git -c user.name=test -c user.email="${test_email}" -c commit.gpgsign=false "$@"; }
