@@ -19,8 +19,8 @@
 //
 // # Result classes
 //
-// ParseJSON returns a Usage with a nil error, or a zero Usage with an error. ParseStream returns one of three
-// classes, and only these three:
+// [ParseJSON] returns a [Usage] with a nil error, or a zero [Usage] with an error. [ParseStream] returns one
+// of three classes, and only these three:
 //
 //   - final: a nil error, or a [*TrailingError]. The stream reached its final event; the Usage is exactly the
 //     usage at that event. A *TrailingError says that something was wrong after it, for logging.
@@ -41,9 +41,9 @@
 //		// no usage was read
 //	}
 //
-// errors.As gives the same answer, because the cause inside either type never holds the other: a reader's
-// error is kept as an opaque cause that errors.Is matches (the reader's error value itself, by identity, and
-// everything in its chain, such as io.ErrUnexpectedEOF or a context error) but errors.As does not unwrap, so
+// [errors.As] gives the same answer, because the cause inside either type never holds the other: a reader's
+// error is kept as an opaque cause that [errors.Is] matches (the reader's error value itself, by identity, and
+// everything in its chain, such as [io.ErrUnexpectedEOF] or a context error) but errors.As does not unwrap, so
 // errors.As never finds a *PartialError or *TrailingError the reader returned. Every method of the package's
 // error types is safe on a nil value. Both types unwrap to their cause, so errors.Is matches [ErrTruncated],
 // [ErrMalformed], [ErrInconsistent], [ErrOutOfRange], [ErrNoUsage], [ErrTooLarge], [ErrLineTooLong] or the
@@ -51,14 +51,14 @@
 //
 // # Readers
 //
-// Only an error that is io.EOF itself ends the input cleanly. Any other error, including one that wraps or
+// Only an error that is [io.EOF] itself ends the input cleanly. Any other error, including one that wraps or
 // joins io.EOF, and a typed nil error value, is a reader failure, reported after every byte the reader
 // returned before it. A reader that returns no byte and no error 100 times in a row fails with
-// io.ErrNoProgress, as bufio does; the result class then follows the usual rules, so usage read before it is
-// partial.
+// [io.ErrNoProgress], as [bufio] does; the result class then follows the usual rules, so usage read before it
+// is partial.
 //
 // JSON nesting has no depth limit of its own: values are checked and skipped without recursion, one byte of
-// memory per open object or array, so the byte limits bound the depth. encoding/json alone would refuse
+// memory per open object or array, so the byte limits bound the depth. [encoding/json] alone would refuse
 // nesting past 10,000 levels.
 //
 // # Streams
@@ -67,26 +67,27 @@
 // that ends within [Limits.MaxBytes] is handled even when the reader already returned bytes past the limit.
 // An event counts only once the blank line that ends it was read, and the chat end marker is data whose whole
 // text is [DONE]. The parse stops at the first problem; a problem after the final event leaves the final usage
-// exact and is reported as a *TrailingError.
+// exact and is reported as a [*TrailingError].
 //
-// Counts accumulate by the rule of each family. Anthropic: each count takes the latest value a block reports,
-// and only a value lower than before is a contradiction. Chat completions: the latest complete block wins as
-// a whole; a block with no count lower than in the block before is consistent (servers that send cumulative
-// usage on every chunk send growing blocks), and only a block with any lower count is a contradiction.
-// Responses: only the block of the final event counts. A contradiction stops the parse with [ErrInconsistent]
-// inside a *PartialError and the latest values.
+// Counts accumulate by the rule of each family. [Anthropic]: each count takes the latest value a block
+// reports, and only a value lower than before is a contradiction. Chat completions ([OpenAIChat]): the latest
+// complete block wins as a whole; a block with no count lower than in the block before is consistent (servers
+// that send cumulative usage on every chunk send growing blocks), and only a block with any lower count is a
+// contradiction. Responses ([OpenAIResponses]): only the block of the final event counts. A contradiction
+// stops the parse with [ErrInconsistent] inside a [*PartialError] and the latest values.
 //
-// What a partial result bounds: unless the error matches ErrInconsistent, every count, and so TotalInputTokens
-// and TotalTokens, is at least what ParseStream returns, under the same Limits, for any shorter part of the
-// same stream cut after an event. The rule holds for the same Limits only: a larger MaxTokens can accept a
-// block that a smaller one refuses. UncachedInputTokens is a difference and is not a lower bound, since a
-// later report can raise the cached part of an unchanged prompt.
+// What a partial result bounds: unless the error matches [ErrInconsistent], every count, and so
+// [Usage.TotalInputTokens] and [Usage.TotalTokens], is at least what [ParseStream] returns, under the same
+// [Limits], for any shorter part of the same stream cut after an event. The rule holds for the same Limits
+// only: a larger [Limits.MaxTokens] can accept a block that a smaller one refuses. [Usage.UncachedInputTokens]
+// is a difference and is not a lower bound, since a later report can raise the cached part of an unchanged
+// prompt.
 //
 // # Known limits
 //
 //   - A total_tokens member that contradicts the input and output counts is not read or checked: the counts
 //     are taken as reported.
-//   - ParseJSON does not read the status of a Responses reply, so a complete JSON body whose status is
+//   - [ParseJSON] does not read the status of a Responses reply, so a complete JSON body whose status is
 //     in_progress is read as final.
 //   - Anthropic beta compaction usage, reported apart from the top-level counts (usage.iterations entries of
 //     type compaction), is not counted, so a reply that used compaction is under-counted.

@@ -14,9 +14,10 @@ import (
 // Responses) or prompt_tokens and completion_tokens (chat completions). Other counts are optional and absent
 // or null ones are zero.
 //
-// Errors: ErrInvalidLimits, a *LimitError matching ErrTooLarge, ErrMalformed, ErrNoUsage, ErrOutOfRange, or
-// the reader's error as an opaque cause with bounded text, which errors.Is matches and errors.As does not
-// unwrap. Only an error that is io.EOF itself ends the reply. On error the Usage is zero.
+// Errors: [ErrInvalidLimits], a [*LimitError] matching [ErrTooLarge], [ErrMalformed], [ErrNoUsage],
+// [ErrOutOfRange], or the reader's error as an opaque cause with bounded text, which [errors.Is] matches and
+// [errors.As] does not unwrap. Only an error that is [io.EOF] itself ends the reply. On error the [Usage] is
+// zero.
 func ParseJSON(f Family, r io.Reader, lim Limits) (Usage, error) {
 	if err := lim.check(f, false); err != nil {
 		return Usage{}, err
