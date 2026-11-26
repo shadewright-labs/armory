@@ -20,11 +20,14 @@ import (
 //     returned together with the end, gives the same Usage, the same result class (final, trailing, partial,
 //     none) and the same matching sentinels.
 //   - Lower bound: let P be the longest part of the input that ends after an event (a blank line) and is no
-//     longer than MaxBytes. If ParseStream gives P a nil error, the input gives exactly P's Usage, with a nil
-//     error or a *TrailingError. Otherwise, unless the input's error matches ErrInconsistent, every count of the
-//     input's Usage is at least the same count of P's. So an event that ends within MaxBytes is never lost to
-//     a byte the reader returned past the limit. The rule is checked on inputs with LF line ends only, where
-//     a blank line is "\n\n".
+//     longer than MaxBytes, read under the same Limits. If ParseStream gives P a final usage (a nil error or
+//     a *TrailingError), the input gives exactly P's Usage, with a nil error or a *TrailingError. Otherwise
+//     the input's result is not final, since a final event counts only when it ends within the limit, and
+//     unless its error matches ErrInconsistent, every count of its Usage is at least the same count of P's.
+//     So an event that ends within MaxBytes is never lost to a byte the reader returned past the limit, and
+//     one cut by the limit, even between the CR and LF of its blank line, is never final. The rule is checked
+//     on inputs whose line ends are all LF, all CR LF or all CR, where a blank line is "\n\n", "\r\n\r\n"
+//     or "\r\r".
 
 // chunkReader returns data in reads whose sizes come from size, then err. With together set, the read that
 // returns the last bytes returns err with them.
@@ -87,11 +90,42 @@ func outcome(t testing.TB, u Usage, err error) string {
 // errChunkCut is the reader error of the property's failing readers.
 var errChunkCut = errors.New("connection reset")
 
-// lastEventEnd returns the length of the longest part of data that ends after a blank line and is at most n
-// bytes long, or 0.
-func lastEventEnd(data []byte, n int64) int {
+// blankLine returns how a blank line looks in data when all its line ends are of one kind, and false for
+// mixed line ends or a leading byte order mark.
+func blankLine(data []byte) (string, bool) {
+	hasCR, hasLF := bytes.IndexByte(data, '\r') >= 0, bytes.IndexByte(data, '\n') >= 0
+	switch {
+	case bytes.HasPrefix(data, byteOrderMark):
+		return "", false
+	case !hasCR:
+		return "\n\n", true
+	case !hasLF:
+		return "\r\r", true
+	case bytes.Count(data, []byte("\r")) == bytes.Count(data, []byte("\r\n")) &&
+		bytes.Count(data, []byte("\n")) == bytes.Count(data, []byte("\r\n")):
+		return "\r\n\r\n", true
+	}
+	return "", false
+}
+
+// endsAfter returns the offsets just after each blank line sep in data.
+func endsAfter(data []byte, sep string) []int {
+	var ends []int
+	for i := 0; ; {
+		k := bytes.Index(data[i:], []byte(sep))
+		if k < 0 {
+			return ends
+		}
+		i += k + len(sep)
+		ends = append(ends, i)
+	}
+}
+
+// lastEventEnd returns the length of the longest part of data that ends after a blank line sep and is at most
+// n bytes long, or 0.
+func lastEventEnd(data []byte, sep string, n int64) int {
 	best := 0
-	for _, end := range eventEnds(data) {
+	for _, end := range endsAfter(data, sep) {
 		if int64(end) > n {
 			break
 		}
@@ -100,20 +134,20 @@ func lastEventEnd(data []byte, n int64) int {
 	return best
 }
 
-// checkChunking runs data through every chunking under lim, once ending in EOF and once in a reader error, and
+// checkChunking runs data through every chunking under lim, ending in each kind of reader end, and
 // checks that the outcomes agree and keep the lower-bound rule.
 func checkChunking(t *testing.T, f Family, data []byte, lim Limits, seed uint64) {
 	t.Helper()
-	lfOnly := !bytes.ContainsRune(data, '\r') && !bytes.HasPrefix(data, byteOrderMark)
+	sep, lfOnly := blankLine(data)
 	var prefix Usage
 	var prefixFinal bool
 	if lfOnly {
-		plim := lim
-		plim.MaxBytes = testLimits.MaxBytes
-		u, err := ParseStream(f, bytes.NewReader(data[:lastEventEnd(data, lim.MaxBytes)]), plim)
-		prefix, prefixFinal = u, err == nil
+		// The same Limits: the property holds for them only.
+		u, err := ParseStream(f, bytes.NewReader(data[:lastEventEnd(data, sep, lim.MaxBytes)]), lim)
+		prefix, prefixFinal = u, resultClass(t, err) == classFinal || resultClass(t, err) == classTrailing
 	}
-	for _, end := range []error{io.EOF, errChunkCut} {
+	// The reader ends in io.EOF, in a failure, in a failure that joins io.EOF, or in a typed nil error.
+	for _, end := range []error{io.EOF, errChunkCut, errors.Join(io.EOF, errChunkCut), (*PartialError)(nil)} {
 		want, wantFrom := "", ""
 		for name, reader := range chunkings(seed) {
 			u, err := ParseStream(f, reader(data, end), lim)
@@ -133,6 +167,10 @@ func checkChunking(t *testing.T, f Family, data []byte, lim Limits, seed uint64)
 						f, lim.MaxBytes, data, u, err, prefix)
 				}
 				continue
+			}
+			if class := resultClass(t, err); class == classFinal || class == classTrailing {
+				t.Fatalf("%v, MaxBytes %d, input %q: final usage %+v (err %v), but the longest event prefix within "+
+					"the limit has no final event", f, lim.MaxBytes, data, u, err)
 			}
 			if errors.Is(err, ErrInconsistent) {
 				continue
@@ -180,7 +218,11 @@ func chunkingInputs(t testing.TB) []chunkingInput {
 		case strings.HasPrefix(e.Name(), "chat"):
 			f = OpenAIChat
 		}
-		in = append(in, chunkingInput{e.Name(), f, data, testLimits.MaxLineBytes})
+		in = append(in, chunkingInput{e.Name(), f, data, testLimits.MaxLineBytes},
+			chunkingInput{e.Name() + " crlf", f, bytes.ReplaceAll(data, []byte("\n"), []byte("\r\n")),
+				testLimits.MaxLineBytes},
+			chunkingInput{e.Name() + " cr", f, bytes.ReplaceAll(data, []byte("\n"), []byte("\r")),
+				testLimits.MaxLineBytes})
 	}
 	for _, c := range streamInlineCases() {
 		line := testLimits.MaxLineBytes
@@ -202,10 +244,11 @@ func chunkingInputs(t testing.TB) []chunkingInput {
 }
 
 // byteLimits returns the MaxBytes values the property tries for an input of n bytes: every one from 1 to n+2
-// for a short input; for a long one, the ends, both sides of each event end and a seeded sample.
+// for an input up to the size of the largest fixture with CR LF line ends; for a longer one, the ends, both
+// sides of each event end and a seeded sample.
 func byteLimits(data []byte, seed uint64) []int64 {
 	n := int64(len(data))
-	if n <= 700 {
+	if n <= 4096 {
 		out := make([]int64, 0, n+2)
 		for i := int64(1); i <= n+2; i++ {
 			out = append(out, i)
@@ -234,6 +277,7 @@ func TestResultDoesNotDependOnChunking(t *testing.T) {
 	const seed = 20261126
 	for _, in := range chunkingInputs(t) {
 		t.Run(in.family.String()+"/"+in.name, func(t *testing.T) {
+			t.Parallel()
 			limits := byteLimits(in.data, seed)
 			if testing.Short() || raceEnabled {
 				limits = limits[:min(len(limits), 48)]

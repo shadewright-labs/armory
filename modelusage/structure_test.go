@@ -3,6 +3,7 @@ package modelusage
 import (
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"os"
 	"strings"
@@ -12,8 +13,8 @@ import (
 // TestStreamHasOneExit reads the package source and checks the shape that keeps every ParseStream result in
 // one place:
 //
-//   - ParseStream has two return statements: the refusal of invalid limits, before any byte is read, and
-//     return p.result();
+//   - ParseStream is exactly parseStreamSource: the refusal of invalid limits, before any byte is read, the
+//     loop over step, and return p.result();
 //   - no method of streamParser except result returns a Usage or an error, so reading, line splitting, event
 //     assembly and the handlers of each family can only update the state or report a problem;
 //   - result is the only code that builds a *PartialError or a *TrailingError.
@@ -109,52 +110,29 @@ func returnsUsageOrError(fn *ast.FuncDecl) bool {
 	return false
 }
 
-// checkParseStream checks that ParseStream returns only on invalid limits and through p.result().
+// parseStreamSource is the whole of ParseStream, as go/printer prints it without its doc comment. Any change
+// to it, even to the condition of the first guard, fails the test, so that a second way out cannot slip in.
+const parseStreamSource = `func ParseStream(f Family, r io.Reader, lim Limits) (Usage, error) {
+	if err := lim.check(f, true); err != nil {
+		return Usage{}, err
+	}
+	p := newStreamParser(f, r, lim)
+	for p.step() {
+	}
+	return p.result()
+}`
+
+// checkParseStream checks that ParseStream is exactly parseStreamSource: it returns only on invalid limits,
+// before reading, and through p.result().
 func checkParseStream(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl) {
 	t.Helper()
-	var returns []*ast.ReturnStmt
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if _, ok := n.(*ast.FuncLit); ok {
-			return false
-		}
-		if r, ok := n.(*ast.ReturnStmt); ok {
-			returns = append(returns, r)
-		}
-		return true
-	})
-	if len(returns) != 2 {
-		t.Fatalf("%s: ParseStream has %d return statements, want 2", fset.Position(fn.Pos()), len(returns))
+	bare := *fn
+	bare.Doc = nil
+	var b strings.Builder
+	if err := printer.Fprint(&b, fset, &bare); err != nil {
+		t.Fatal(err)
 	}
-	// The first is inside the if statement that checks the limits, the first statement of the body.
-	first, ok := fn.Body.List[0].(*ast.IfStmt)
-	if !ok || !contains(first, returns[0]) || !strings.Contains(exprString(first.Init), "lim.check") {
-		t.Errorf("%s: the first return of ParseStream is not the refusal of invalid limits",
-			fset.Position(returns[0].Pos()))
+	if got := b.String(); got != parseStreamSource {
+		t.Errorf("%s: ParseStream is\n%s\nwant exactly\n%s", fset.Position(fn.Pos()), got, parseStreamSource)
 	}
-	last := returns[1]
-	if len(last.Results) != 1 || exprString(last.Results[0]) != "p.result()" ||
-		fn.Body.List[len(fn.Body.List)-1] != last {
-		t.Errorf("%s: the last statement of ParseStream is not return p.result()", fset.Position(last.Pos()))
-	}
-}
-
-func contains(outer, inner ast.Node) bool {
-	return outer.Pos() <= inner.Pos() && inner.End() <= outer.End()
-}
-
-// exprString renders the few node shapes checkParseStream compares.
-func exprString(n ast.Node) string {
-	switch n := n.(type) {
-	case *ast.CallExpr:
-		return exprString(n.Fun) + "()"
-	case *ast.SelectorExpr:
-		return exprString(n.X) + "." + n.Sel.Name
-	case *ast.Ident:
-		return n.Name
-	case *ast.AssignStmt:
-		if len(n.Rhs) == 1 {
-			return exprString(n.Rhs[0])
-		}
-	}
-	return ""
 }

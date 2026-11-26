@@ -234,9 +234,9 @@ func TestReaderReturnsAResultType(t *testing.T) {
 		if u.TotalTokens() != 11 || !errors.Is(err, io.ErrUnexpectedEOF) || !errors.Is(err, ErrTruncated) {
 			t.Errorf("usage %+v, err %v: want 11 tokens matching io.ErrUnexpectedEOF and ErrTruncated", u, err)
 		}
-		// The opaque cause matches sentinels, never a result type of this package, even the reader's own value.
-		if errors.Is(err, readerErr) {
-			t.Errorf("err = %v matches the reader's %T value", err, readerErr)
+		// The opaque cause matches the reader's own error value by identity, while errors.As stays false.
+		if !errors.Is(err, readerErr) {
+			t.Errorf("err = %v does not match the reader's %T value", err, readerErr)
 		}
 	}
 	// Before any usage the reader's error is the cause alone; it is still no result type.
@@ -265,5 +265,159 @@ func TestErrorText(t *testing.T) {
 	}
 	if !strings.Contains(text, "detail?[31m?") {
 		t.Errorf("message %q lacks the sanitised start of the reader's text", text)
+	}
+}
+
+// Inputs of the reader and framing regressions below.
+const (
+	rfBlock = "data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1}}\n\n"
+	rfGrown = "data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":2}}\n\n"
+	rfDone  = "data: [DONE]\n\n"
+)
+
+var rfLimits = Limits{MaxBytes: 4096, MaxLineBytes: 1024, MaxTokens: 100}
+
+// emptyReads returns (0, nil) n times, then all of data in one read, then io.EOF.
+type emptyReads struct {
+	n    int
+	data string
+	done bool
+}
+
+func (e *emptyReads) Read(p []byte) (int, error) {
+	if e.n > 0 {
+		e.n--
+		return 0, nil
+	}
+	if e.done {
+		return 0, io.EOF
+	}
+	e.done = true
+	return copy(p, e.data), nil
+}
+
+func TestReaderAndFramingRegressions(t *testing.T) {
+	type result struct {
+		total int64
+		class string
+		cause error
+	}
+	sized := func(data string, size int, end error, together bool) func() io.Reader {
+		return func() io.Reader {
+			return &chunkReader{data: []byte(data), size: func() int { return size }, err: end, together: together}
+		}
+	}
+	whole := 1 << 20
+	tooFew := rfLimits
+	tooFew.MaxTokens = 3
+	deep := Limits{MaxBytes: 32768, MaxLineBytes: 32768, MaxTokens: 100}
+	deepInput := "data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1},\"x\":" + strings.Repeat("[", 10000) +
+		strings.Repeat("]", 10000) + "}\n\n" + rfDone
+	crlf := rfBlock + "data: [DONE]\r\n\r\n"
+	joined := errors.Join(io.EOF, io.ErrUnexpectedEOF)
+	tests := []struct {
+		name   string
+		family Family
+		lim    Limits
+		reader func() io.Reader
+		want   result
+	}{
+		// 1: a cap between the CR and the LF of the final blank line cuts that line: partial, never final.
+		{"cap inside CR LF, whole", OpenAIChat, Limits{MaxBytes: 74, MaxLineBytes: 1024, MaxTokens: 100},
+			sized(crlf, whole, io.EOF, false), result{3, classPartial, ErrTooLarge}},
+		{"cap inside CR LF, one byte", OpenAIChat, Limits{MaxBytes: 74, MaxLineBytes: 1024, MaxTokens: 100},
+			sized(crlf, 1, io.EOF, false), result{3, classPartial, ErrTooLarge}},
+		{"cap before the CR LF", OpenAIChat, Limits{MaxBytes: 73, MaxLineBytes: 1024, MaxTokens: 100},
+			sized(crlf, whole, io.EOF, false), result{3, classPartial, ErrTooLarge}},
+		{"cap after the CR LF", OpenAIChat, Limits{MaxBytes: 75, MaxLineBytes: 1024, MaxTokens: 100},
+			sized(crlf, whole, io.EOF, false), result{3, classFinal, nil}},
+		// 2: a typed nil error from the reader is a reader failure, never a panic, whatever the chunking.
+		{"typed nil with the last bytes", OpenAIChat, tooFew,
+			sized(rfBlock+rfGrown+rfDone, whole, (*PartialError)(nil), true), result{3, classPartial, ErrOutOfRange}},
+		{"typed nil, one byte", OpenAIChat, tooFew,
+			sized(rfBlock+rfGrown+rfDone, 1, (*PartialError)(nil), true), result{3, classPartial, ErrOutOfRange}},
+		{"typed nil PartialError later", OpenAIChat, rfLimits, sized(rfBlock, whole, (*PartialError)(nil), false),
+			result{3, classPartial, ErrTruncated}},
+		{"typed nil TrailingError later", OpenAIChat, rfLimits, sized(rfBlock, whole, (*TrailingError)(nil), false),
+			result{3, classPartial, ErrTruncated}},
+		{"typed nil LimitError later", OpenAIChat, rfLimits, sized(rfBlock, whole, (*LimitError)(nil), false),
+			result{3, classPartial, ErrTruncated}},
+		// 3: the lower bound holds under the same Limits: the shorter part gives 2/1 too.
+		{"refused block, whole stream", OpenAIChat, tooFew, sized(rfBlock+rfGrown+rfDone, whole, io.EOF, false),
+			result{3, classPartial, ErrOutOfRange}},
+		{"refused block, shorter part, same limits", OpenAIChat, tooFew, sized(rfBlock+rfGrown, whole, io.EOF, false),
+			result{3, classPartial, ErrOutOfRange}},
+		// 4: only io.EOF itself ends the input; a join with io.EOF is a reader failure.
+		{"joined EOF after the final event", OpenAIChat, rfLimits, sized(rfBlock+rfDone, whole, joined, false),
+			result{3, classTrailing, io.ErrUnexpectedEOF}},
+		{"joined EOF before the final event", OpenAIChat, rfLimits, sized(rfBlock, whole, joined, false),
+			result{3, classPartial, io.ErrUnexpectedEOF}},
+		// 7: io.ErrNoProgress after 100 empty reads in a row, with the usual result classes.
+		{"99 empty reads", OpenAIChat, rfLimits, func() io.Reader { return &emptyReads{n: 99, data: rfBlock + rfDone} },
+			result{3, classFinal, nil}},
+		{"100 empty reads before any byte", OpenAIChat, rfLimits,
+			func() io.Reader { return &emptyReads{n: 100, data: rfBlock + rfDone} }, result{0, classNone, io.ErrNoProgress}},
+		{"100 empty reads after usage", OpenAIChat, rfLimits, func() io.Reader {
+			return io.MultiReader(strings.NewReader(rfBlock), &emptyReads{n: 100, data: rfDone})
+		}, result{3, classPartial, io.ErrNoProgress}},
+		// 8: nesting deeper than encoding/json accepts, within the byte limits, still parses.
+		{"deeply nested unknown member", OpenAIChat, deep, sized(deepInput, 32768, io.EOF, false),
+			result{3, classFinal, nil}},
+		// 9: an unfinished event of any fields after the final event is a trailing problem.
+		{"unfinished named event after the final event", OpenAIResponses, rfLimits,
+			sized("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,"+
+				"\"output_tokens\":1}}}\n\nevent: response.completed\n", whole, io.EOF, false),
+			result{3, classTrailing, ErrTruncated}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u, err := ParseStream(tt.family, tt.reader(), tt.lim)
+			if got := resultClass(t, err); got != tt.want.class {
+				t.Fatalf("class %s (err %v), want %s", got, err, tt.want.class)
+			}
+			if u.TotalTokens() != tt.want.total {
+				t.Errorf("total %d (usage %+v), want %d", u.TotalTokens(), u, tt.want.total)
+			}
+			if (tt.want.cause == nil) != (err == nil) || tt.want.cause != nil && !errors.Is(err, tt.want.cause) {
+				t.Errorf("err = %v, want %v", err, tt.want.cause)
+			}
+		})
+	}
+}
+
+// TestNilErrorValues checks that every method of every error type is safe on a nil receiver.
+func TestNilErrorValues(t *testing.T) {
+	var (
+		pe *PartialError
+		te *TrailingError
+		le *LimitError
+		re *readError
+	)
+	for _, err := range []error{pe, te, le, re} {
+		if text := err.Error(); !strings.HasPrefix(text, "modelusage: ") {
+			t.Errorf("%T: text %q", err, text)
+		}
+		if errors.Is(err, ErrTooLarge) || errors.Is(err, ErrTruncated) {
+			t.Errorf("nil %T matches a sentinel", err)
+		}
+	}
+	if pe.Unwrap() != nil || te.Unwrap() != nil || le.Is(ErrTooLarge) || re.Is(ErrTruncated) {
+		t.Error("a nil value unwraps or matches")
+	}
+}
+
+// TestJSONReaderErrorText checks that ParseJSON bounds and sanitises a reader's error text, as ParseStream does.
+func TestJSONReaderErrorText(t *testing.T) {
+	readerErr := errors.New(strings.Repeat("x", 8192) + "\x1b\n")
+	u, err := ParseJSON(Anthropic, iotest.ErrReader(readerErr), rfLimits)
+	text := err.Error()
+	if u != (Usage{}) || len(text) > 200 || strings.ContainsAny(text, "\x1b\n") {
+		t.Errorf("usage %+v, error of %d bytes: %q", u, len(text), text)
+	}
+	if !errors.Is(err, readerErr) {
+		t.Errorf("err = %v does not match the reader's error", err)
+	}
+	if _, ok := errors.AsType[*PartialError](err); ok {
+		t.Errorf("err = %v is a partial result", err)
 	}
 }

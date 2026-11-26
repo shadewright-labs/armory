@@ -6,7 +6,7 @@ import (
 	"unicode/utf8"
 )
 
-// The functions below walk JSON that json.Valid has already accepted (a whole reply, or the data of one stream
+// The functions below walk JSON that validJSON has already accepted (a whole reply, or the data of one stream
 // event), so they only find where each value ends. They never build the members of an object: a caller is
 // handed each name and raw value in turn and keeps the few it reads, and every other value is skipped.
 

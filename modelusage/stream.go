@@ -15,8 +15,10 @@ import (
 // delivers in one call. Lines end in LF, CRLF or a bare CR, and a byte order mark at the start of the stream
 // is skipped. Comment lines and fields other than data are ignored. The data lines of one event, with the one
 // space after the colon removed, are joined with LF and decoded as one JSON value when the blank line that ends
-// the event is read. An event the input ends inside, without that blank line, is never handled: before the
-// final event it makes the stream truncated, after it a trailing problem.
+// the event is read. A CR LF line end is consumed whole before its line is handled, so a byte limit between
+// the CR and the LF cuts the line. An event the input ends inside (any field line without the blank line that
+// ends it) is never handled: before the final event it makes the stream truncated, after it a trailing
+// problem.
 //
 // Which usage counts, per family:
 //
@@ -52,9 +54,10 @@ import (
 //     ErrTruncated, or the reader's error.
 //
 // ParseStream returns *TrailingError and *PartialError themselves, never wrapped, and their cause never holds
-// either type: a reader's error is kept as an opaque cause that errors.Is matches (io.ErrUnexpectedEOF, a
-// context error, a sentinel of the caller's) but errors.As does not unwrap. A reader error before the final
-// event also matches ErrTruncated.
+// either type: a reader's error is kept as an opaque cause that errors.Is matches (the reader's error value and
+// its chain: io.ErrUnexpectedEOF, a context error, a sentinel of the caller's) but errors.As does not unwrap.
+// A reader error before the final event also matches ErrTruncated. Only io.EOF itself ends the input; see the
+// package documentation for other reader errors and empty reads.
 func ParseStream(f Family, r io.Reader, lim Limits) (Usage, error) {
 	if err := lim.check(f, true); err != nil {
 		return Usage{}, err
@@ -84,11 +87,11 @@ type streamParser struct {
 	readErr error // the reader's error, reported once every byte before it is consumed
 	empty   int   // reads in a row that returned no byte and no error
 	bomDone bool  // the start of the stream was checked for a byte order mark
-	skipLF  bool  // the last line ended in CR, so an LF right after it belongs to that line end
 
 	// Event assembly.
 	data    []byte // the joined data lines of the current event
 	pending bool   // the current event has a data line
+	open    bool   // the current event has a field line of any name, so its blank line is still due
 
 	// The accumulator.
 	started   bool           // Anthropic: message_start seen
@@ -165,8 +168,9 @@ func (p *streamParser) end() {
 	switch {
 	case p.readErr != nil:
 		p.report(&readError{err: p.readErr, truncated: !p.done})
-	case p.pending:
-		// The input ended inside an event: it is not handled, so it cannot be the final event.
+	case p.open:
+		// The input ended inside an event, whatever its fields: it is not handled, so it cannot be the final
+		// event, and after the final event it is a trailing problem.
 		p.report(ErrTruncated)
 	}
 }
@@ -191,17 +195,29 @@ func (p *streamParser) nextLine() ([]byte, bool) {
 		if left := p.lim.MaxBytes - p.pos; int64(len(window)) > left {
 			window = window[:left]
 		}
-		if p.skipLF && len(window) > 0 {
-			p.skipLF = false
-			if window[0] == '\n' {
-				p.consume(1)
-				continue
-			}
-		}
 		scan := window[:min(len(window), p.lim.MaxLineBytes+1)]
 		if i := bytes.IndexAny(scan, "\r\n"); i >= 0 {
-			p.consume(i + 1)
-			p.skipLF = scan[i] == '\r'
+			// A line end is consumed whole before the line is handed out: LF, CR LF, or a CR whose next byte
+			// is known not to be LF.
+			end := i + 1
+			if scan[i] == '\r' {
+				switch {
+				case i+1 < len(window):
+					if window[i+1] == '\n' {
+						end++
+					}
+				case i+1 < len(avail):
+					// The next byte lies past the byte limit. If it is the LF of this CR LF, the line end is
+					// cut by the limit, so the line is not complete within it.
+					if avail[i+1] == '\n' {
+						p.report(&LimitError{Limit: p.lim.MaxBytes})
+						return nil, false
+					}
+				case p.fill():
+					continue
+				}
+			}
+			p.consume(end)
 			return scan[:i], true
 		}
 		switch {
@@ -268,7 +284,8 @@ func (p *streamParser) fill() bool {
 	p.buf = p.buf[:len(p.buf)+n]
 	p.read += int64(n)
 	switch {
-	case errors.Is(err, io.EOF):
+	case err == io.EOF:
+		// Only io.EOF itself ends the input; one wrapped or joined with another error is a failure.
 		p.eof = true
 	case err != nil:
 		p.readErr = err
@@ -289,11 +306,13 @@ func (p *streamParser) line(line []byte) {
 			p.event(p.data)
 			p.data, p.pending = p.data[:0], false
 		}
+		p.open = false
 		return
 	}
 	if line[0] == ':' {
 		return
 	}
+	p.open = true
 	name, value, _ := bytes.Cut(line, []byte(":"))
 	if string(name) != "data" {
 		return
@@ -518,33 +537,4 @@ func anyLower(next, prev Usage) bool {
 		}
 	}
 	return false
-}
-
-// readError is a reader's error kept as the cause of a result. It has no Unwrap method, so errors.As never
-// reaches a type in the reader's chain: a reader that returns a *TrailingError cannot make a partial result
-// look final. errors.Is still matches every target in that chain, and ErrTruncated when the reader failed
-// before the final event.
-type readError struct {
-	err       error
-	truncated bool
-}
-
-// maxReaderText is how many bytes of a reader's error text an error message of this package carries.
-const maxReaderText = 64
-
-func (e *readError) Error() string {
-	return "modelusage: reading the stream failed: " + causeText(e.err, maxReaderText)
-}
-
-// Is reports whether target is ErrTruncated (for a failure before the final event) or matches the reader's
-// error. The result types of this package never match.
-func (e *readError) Is(target error) bool {
-	switch target.(type) {
-	case *PartialError, *TrailingError:
-		return false
-	}
-	if e.truncated && target == ErrTruncated {
-		return true
-	}
-	return errors.Is(e.err, target)
 }

@@ -190,7 +190,8 @@ var (
 // final and can be lower than what the provider bills. What a caller may rely on:
 //
 //   - Unless errors.Is(err, ErrInconsistent), every count is at least the same count that ParseStream returns
-//     for any shorter part of the same stream cut after an event, with the same or larger limits. The sums
+//     under the same Limits for any shorter part of the same stream cut after an event (only for the same
+//     Limits: a larger MaxTokens can accept a block a smaller one refuses). The sums
 //     TotalInputTokens and TotalTokens are therefore lower bounds of the usage the stream reported.
 //   - UncachedInputTokens is a difference, not a sum, and is not a lower bound: a later report can raise the
 //     cached or cache write count of an unchanged prompt and so lower it. Price a partial result by its
@@ -205,12 +206,21 @@ type PartialError struct {
 	Err error
 }
 
+// Error returns fixed text and the bounded text of the cause. It is safe on a nil or zero value.
 func (e *PartialError) Error() string {
+	if e == nil {
+		return "modelusage: partial usage: nil error value"
+	}
 	return "modelusage: partial usage: " + causeText(e.Err, maxCauseText)
 }
 
-// Unwrap returns the cause.
-func (e *PartialError) Unwrap() error { return e.Err }
+// Unwrap returns the cause, nil for a nil value.
+func (e *PartialError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
 
 // TrailingError is returned by ParseStream when a stream sent its final event and then something that is not
 // allowed after it: an event that would change the counts or end the reply again, a malformed event, an event
@@ -225,13 +235,22 @@ type TrailingError struct {
 	Err error
 }
 
+// Error returns fixed text and the bounded text of the cause. It is safe on a nil or zero value.
 func (e *TrailingError) Error() string {
-	return "modelusage: the usage is final, but the stream is wrong after its final event: " +
-		causeText(e.Err, maxCauseText)
+	const prefix = "modelusage: the usage is final, but the stream is wrong after its final event: "
+	if e == nil {
+		return prefix + "nil error value"
+	}
+	return prefix + causeText(e.Err, maxCauseText)
 }
 
-// Unwrap returns the cause.
-func (e *TrailingError) Unwrap() error { return e.Err }
+// Unwrap returns the cause, nil for a nil value.
+func (e *TrailingError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
 
 // maxCauseText is how many bytes of a cause's text the message of a PartialError or TrailingError carries.
 const maxCauseText = 160
@@ -268,7 +287,11 @@ type LimitError struct {
 	Limit int64
 }
 
+// Error returns fixed text with the limit. It is safe on a nil value.
 func (e *LimitError) Error() string {
+	if e == nil {
+		return "modelusage: a byte limit was passed"
+	}
 	if e.Line {
 		return fmt.Sprintf("modelusage: a stream line or event is longer than the line limit of %d bytes", e.Limit)
 	}
@@ -277,6 +300,9 @@ func (e *LimitError) Error() string {
 
 // Is reports whether target is ErrLineTooLong (for a line) or ErrTooLarge (for the reply).
 func (e *LimitError) Is(target error) bool {
+	if e == nil {
+		return false
+	}
 	if e.Line {
 		return target == ErrLineTooLong
 	}

@@ -42,10 +42,24 @@
 //	}
 //
 // errors.As gives the same answer, because the cause inside either type never holds the other: a reader's
-// error is kept as an opaque cause that errors.Is matches (io.ErrUnexpectedEOF, a context error) but
-// errors.As does not unwrap. Both types unwrap to their cause, so errors.Is matches [ErrTruncated],
+// error is kept as an opaque cause that errors.Is matches (the reader's error value itself, by identity, and
+// everything in its chain, such as io.ErrUnexpectedEOF or a context error) but errors.As does not unwrap, so
+// errors.As never finds a *PartialError or *TrailingError the reader returned. Every method of the package's
+// error types is safe on a nil value. Both types unwrap to their cause, so errors.Is matches [ErrTruncated],
 // [ErrMalformed], [ErrInconsistent], [ErrOutOfRange], [ErrNoUsage], [ErrTooLarge], [ErrLineTooLong] or the
 // reader's error.
+//
+// # Readers
+//
+// Only an error that is io.EOF itself ends the input cleanly. Any other error, including one that wraps or
+// joins io.EOF, and a typed nil error value, is a reader failure, reported after every byte the reader
+// returned before it. A reader that returns no byte and no error 100 times in a row fails with
+// io.ErrNoProgress, as bufio does; the result class then follows the usual rules, so usage read before it is
+// partial.
+//
+// JSON nesting has no depth limit of its own: values are checked and skipped without recursion, one byte of
+// memory per open object or array, so the byte limits bound the depth. encoding/json alone would refuse
+// nesting past 10,000 levels.
 //
 // # Streams
 //
@@ -63,9 +77,10 @@
 // inside a *PartialError and the latest values.
 //
 // What a partial result bounds: unless the error matches ErrInconsistent, every count, and so TotalInputTokens
-// and TotalTokens, is at least what ParseStream returns for any shorter part of the same stream cut after an
-// event. UncachedInputTokens is a difference and is not a lower bound, since a later report can raise the
-// cached part of an unchanged prompt.
+// and TotalTokens, is at least what ParseStream returns, under the same Limits, for any shorter part of the
+// same stream cut after an event. The rule holds for the same Limits only: a larger MaxTokens can accept a
+// block that a smaller one refuses. UncachedInputTokens is a difference and is not a lower bound, since a
+// later report can raise the cached part of an unchanged prompt.
 //
 // # Known limits
 //

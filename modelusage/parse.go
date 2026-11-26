@@ -2,8 +2,7 @@ package modelusage
 
 import (
 	"bytes"
-	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 )
 
@@ -16,7 +15,8 @@ import (
 // or null ones are zero.
 //
 // Errors: ErrInvalidLimits, a *LimitError matching ErrTooLarge, ErrMalformed, ErrNoUsage, ErrOutOfRange, or
-// the reader's own error wrapped. On error the Usage is zero.
+// the reader's error as an opaque cause with bounded text, which errors.Is matches and errors.As does not
+// unwrap. Only an error that is io.EOF itself ends the reply. On error the Usage is zero.
 func ParseJSON(f Family, r io.Reader, lim Limits) (Usage, error) {
 	if err := lim.check(f, false); err != nil {
 		return Usage{}, err
@@ -27,10 +27,10 @@ func ParseJSON(f Family, r io.Reader, lim Limits) (Usage, error) {
 		return Usage{}, &LimitError{Limit: lim.MaxBytes}
 	}
 	if err != nil {
-		return Usage{}, fmt.Errorf("modelusage: reading the reply: %w", err)
+		return Usage{}, &readError{err: err}
 	}
 	data = bytes.TrimPrefix(data, byteOrderMark)
-	if !json.Valid(data) {
+	if !validJSON(data) {
 		return Usage{}, ErrMalformed
 	}
 	var block []byte
@@ -107,7 +107,7 @@ type eventFields struct {
 // be a string or null; chat completions do not use it, so their chunks leave it unread whatever it holds.
 func decodeEvent(data []byte, withType bool) (eventFields, error) {
 	var ev eventFields
-	if !json.Valid(data) {
+	if !validJSON(data) {
 		return ev, ErrMalformed
 	}
 	err := members(data, func(name, value []byte) error {
@@ -144,4 +144,36 @@ func usageMember(v []byte) ([]byte, error) {
 		return nil
 	})
 	return block, err
+}
+
+// readError is a reader's error kept as the cause of a result. It has no Unwrap method, so errors.As never
+// reaches a type in the reader's chain: a reader that returns a *TrailingError cannot make a partial result
+// look final. errors.Is matches the reader's error value itself and every target in its chain, and
+// ErrTruncated when a stream's reader failed before the final event. Its text is fixed and bounded.
+type readError struct {
+	err       error
+	truncated bool
+}
+
+// maxReaderText is how many bytes of a reader's error text an error message of this package carries.
+const maxReaderText = 64
+
+// Error returns fixed text and the bounded, sanitised start of the reader's text. It is safe on a nil value.
+func (e *readError) Error() string {
+	if e == nil {
+		return "modelusage: reading failed"
+	}
+	return "modelusage: reading failed: " + causeText(e.err, maxReaderText)
+}
+
+// Is reports whether target is ErrTruncated (for a stream that failed before its final event), or is the
+// reader's error or matches its chain.
+func (e *readError) Is(target error) bool {
+	if e == nil {
+		return false
+	}
+	if e.truncated && target == ErrTruncated {
+		return true
+	}
+	return errors.Is(e.err, target)
 }
