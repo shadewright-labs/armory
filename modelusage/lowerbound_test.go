@@ -14,12 +14,13 @@ import (
 // stream after each of its events, read the usage U of that prefix with ParseStream, append bytes (a table of
 // problems, or fuzzed ones) and check that
 //
-//   - unless the error matches ErrInconsistent, every count of the result is at least the same count of U:
-//     an Anthropic count only takes a later value that is not lower (a lower one is the contradiction), a
-//     chat completions block is replaced only by one with no lower count (growing blocks are consistent), and
-//     the Responses usage comes once, in the final event, so U is zero before it. TotalInputTokens and
-//     TotalTokens, sums of counts, follow;
-//     UncachedInputTokens, a difference, does not, and is not checked;
+//   - unless the error matches ErrInconsistent, every count except ReportedTotalTokens is at least the same
+//     count of U, and ReportedTotalTokens is not lower when non-zero: an Anthropic count only takes a later
+//     value that is not lower (a lower one is the contradiction), a chat completions block is replaced only by
+//     one with no lower count (growing blocks are consistent, and ReportedTotalTokens is compared only when
+//     non-zero), and the Responses usage comes once, in the final event, so U is zero before it.
+//     TotalInputTokens and TotalOutputTokens follow; UncachedInputTokens, a difference, does not, and is not
+//     checked;
 //   - with ErrInconsistent, the error is a *PartialError, since a contradiction can only come before the final
 //     event;
 //   - when the prefix holds the final event, the result is exactly U, with a nil error or a *TrailingError;
@@ -33,7 +34,9 @@ var cleanStreams = []struct {
 	family Family
 }{
 	{"anthropic-stream.sse", Anthropic},
+	{"anthropic-stream-advisor.sse", Anthropic},
 	{"anthropic-stream-cache.sse", Anthropic},
+	{"anthropic-stream-compaction.sse", Anthropic},
 	{"anthropic-stream-delta-input.sse", Anthropic},
 	{"anthropic-stream-zero.sse", Anthropic},
 	{"chat-stream.sse", OpenAIChat},
@@ -65,11 +68,21 @@ func eventEnds(data []byte) []int {
 	}
 }
 
-// counts lists the token counts of u, in a fixed order.
-func (u Usage) countList() []int64 {
+// partCounts lists every token count of u except ReportedTotalTokens, in a fixed order.
+func (u Usage) partCounts() []int64 {
 	return []int64{u.InputTokens, u.OutputTokens, u.CacheCreationInputTokens, u.CacheCreation5mInputTokens,
 		u.CacheCreation1hInputTokens, u.CacheReadInputTokens, u.CachedPromptTokens, u.CacheWritePromptTokens,
-		u.CacheWrite30mPromptTokens, u.CacheWrite12hPromptTokens, u.ReasoningTokens}
+		u.CacheWrite30mPromptTokens, u.CacheWrite12hPromptTokens, u.ReasoningTokens, u.CompactionInputTokens,
+		u.CompactionOutputTokens, u.CompactionCacheCreationInputTokens, u.CompactionCacheCreation5mInputTokens,
+		u.CompactionCacheCreation1hInputTokens, u.CompactionCacheReadInputTokens, u.AdvisorInputTokens,
+		u.AdvisorOutputTokens, u.AdvisorCacheCreationInputTokens, u.AdvisorCacheCreation5mInputTokens,
+		u.AdvisorCacheCreation1hInputTokens, u.AdvisorCacheReadInputTokens,
+		u.UnclassifiedIterationInputTokens, u.UnclassifiedIterationOutputTokens}
+}
+
+// countList lists every token count of u, including ReportedTotalTokens, in a fixed order.
+func (u Usage) countList() []int64 {
+	return append(u.partCounts(), u.ReportedTotalTokens)
 }
 
 // prefixCase is a clean stream cut after an event, with the usage ParseStream reads from that prefix.
@@ -162,8 +175,8 @@ func checkLowerBound(t *testing.T, pc prefixCase, suffix []byte, readErr error) 
 	return err
 }
 
-// checkNotLower checks that no count of u is below the prefix's, unless err reports a contradiction, which
-// must then come in a *PartialError.
+// checkNotLower checks that no count of u is below the prefix's (comparing ReportedTotalTokens only when
+// non-zero), unless err reports a contradiction, which must then come in a *PartialError.
 func checkNotLower(t *testing.T, pc prefixCase, u Usage, err error, isPartial bool) {
 	t.Helper()
 	if errors.Is(err, ErrInconsistent) {
@@ -172,11 +185,14 @@ func checkNotLower(t *testing.T, pc prefixCase, u Usage, err error, isPartial bo
 		}
 		return
 	}
-	got, low := u.countList(), pc.usage.countList()
+	got, low := u.partCounts(), pc.usage.partCounts()
 	for i := range low {
 		if got[i] < low[i] {
 			t.Fatalf("usage %+v (err %v) is less than the usage %+v of the prefix", u, err, pc.usage)
 		}
+	}
+	if u.ReportedTotalTokens != 0 && u.ReportedTotalTokens < pc.usage.ReportedTotalTokens {
+		t.Fatalf("usage %+v (err %v) has lower ReportedTotalTokens than the prefix %+v", u, err, pc.usage)
 	}
 }
 
@@ -199,7 +215,7 @@ func problems(f Family) map[string]string {
 		p["later count out of range"] = "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":-1}}\n\n"
 		p["later count not an integer"] = "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1.5}}\n\n"
 		p["later lower counts"] = "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0," +
-			"\"cache_read_input_tokens\":0}}\n\n"
+			"\"cache_read_input_tokens\":0,\"iterations\":[]}}\n\n"
 		p["later count above the limit"] = "data: {\"type\":\"message_delta\"," +
 			"\"usage\":{\"output_tokens\":1099511627777}}\n\n"
 		p["error event"] = "data: {\"type\":\"error\"}\n\n"

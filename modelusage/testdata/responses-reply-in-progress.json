@@ -1,0 +1,15 @@
+{
+  "id": "resp_test0002",
+  "object": "response",
+  "created_at": 1700000000,
+  "status": "in_progress",
+  "error": null,
+  "incomplete_details": null,
+  "model": "gpt-example",
+  "output": [],
+  "usage": {
+    "input_tokens": 75,
+    "output_tokens": 12,
+    "total_tokens": 87
+  }
+}

@@ -31,12 +31,46 @@
 
 | Package | What it is for | State |
 | --- | --- | --- |
-| [`modelusage`](modelusage) | Reading the token usage a model provider reports in a reply (Anthropic Messages, OpenAI chat completions and Responses), complete or streamed, within byte limits the caller sets, with cache and reasoning tokens counted once | Available |
+| [`modelusage`](modelusage) | Reading the token usage a model provider reports in a reply (Anthropic Messages, OpenAI chat completions and Responses), complete or streamed, within byte limits the caller sets, with cache, reasoning, compaction and advisor tokens counted once | Available |
 | Redaction | Hiding known secret forms in text from outside a product, in bounded time, before the text reaches a model, storage, logs or a person | Planned, next |
 | Hygiene checks | Checks a repository runs before publishing: emails, local paths and key-shaped literals in tracked files | Planned |
 | Audit chain | Chained audit records, so that an edit, a removed row or a truncated tail is detected | Planned |
 
 These are the parts of the [six shared security laws](https://shadewrightlabs.com/#security-laws) that more than one product needs. Each product keeps its own policy, approvals, tokens and model clients.
+
+## Use it
+
+Import path: `github.com/shadewright-labs/armory/modelusage`.
+
+There is no tagged version yet, so `go get` needs `@main` or a commit hash, and the API can change until v1.0.0:
+
+```bash
+go get github.com/shadewright-labs/armory@main
+```
+
+```go
+const reply = `{
+	"id": "msg_01",
+	"type": "message",
+	"role": "assistant",
+	"usage": {
+		"input_tokens": 50,
+		"cache_creation_input_tokens": 240,
+		"cache_read_input_tokens": 1800,
+		"output_tokens": 120
+	}
+}`
+lim := modelusage.Limits{MaxBytes: 1 << 20, MaxTokens: 1 << 30}
+u, err := modelusage.ParseJSON(modelusage.Anthropic, strings.NewReader(reply), lim)
+if err != nil {
+	fmt.Println("error:", err)
+	return
+}
+fmt.Printf("prompt=%d uncached=%d output=%d total=%d\n",
+	u.TotalInputTokens(), u.UncachedInputTokens(), u.OutputTokens, u.TotalTokens())
+```
+
+More runnable examples are in [modelusage/example_test.go](modelusage/example_test.go). They will also show on [pkg.go.dev](https://pkg.go.dev/github.com/shadewright-labs/armory/modelusage) once the first version is tagged.
 
 ## Repositories
 

@@ -1,0 +1,18 @@
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_test0005","type":"message","role":"assistant","model":"claude-example","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":23000,"output_tokens":1,"iterations":[{"type":"compaction","input_tokens":180000,"output_tokens":3500,"cache_read_input_tokens":50000}]}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The pod is out of memory."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1000,"iterations":[{"type":"compaction","input_tokens":180000,"output_tokens":3500,"cache_read_input_tokens":50000},{"type":"message","input_tokens":23000,"output_tokens":1000}]}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
