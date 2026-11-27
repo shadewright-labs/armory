@@ -573,6 +573,10 @@ func (c *Client) Do(ctx context.Context, r Request) (Response, error) {
 		case err == nil:
 			// An answer such as 409 or 422 after an attempt whose answer was lost may be about that attempt.
 			return Response{}, outcomeUnknown(r.Op, StatusError(r.Op, resp.Status))
+		case errors.Is(err, githost.ErrStoppedBeforeWrite):
+			// The write check refused, or there is none: the call stops whatever else the error matches,
+			// a deadline included, and the refusal keeps its class.
+			return Response{}, finalError(r.Op, err, mayHaveWritten)
 		case errors.Is(err, githost.ErrUnusableReceipt):
 			// This attempt was accepted. When an earlier one may have written too, the host may hold two
 			// writes, so the caller learns both.
@@ -628,12 +632,8 @@ func (c *Client) buildURL(r Request) (*url.URL, error) {
 	if r.IfNoneMatch != "" && !validIfNoneMatch(r.IfNoneMatch) {
 		return nil, rejected
 	}
-	if r.IfNoneMatch == "" {
-		for _, v := range c.header.Values("If-None-Match") {
-			if !validIfNoneMatch(v) {
-				return nil, rejected
-			}
-		}
+	if inm := c.header.Values("If-None-Match"); r.IfNoneMatch == "" && len(inm) > 0 && !validIfNoneMatchField(inm) {
+		return nil, rejected
 	}
 	if ims := c.header.Values("If-Modified-Since"); len(ims) > 0 {
 		if len(ims) != 1 || !validIfModifiedSince(ims[0]) {
@@ -664,6 +664,11 @@ func (c *Client) once(ctx context.Context, r Request, u *url.URL, attempt int) (
 		return Response{}, false, ctxError(r.Op, ctx)
 	}
 	write := isWrite(r.Method)
+	if write && c.check == nil {
+		// A nil check refuses every write. It refuses before the credential is asked, so no write token is
+		// minted for a write that will not be sent and no credential error hides the refusal.
+		return Response{}, false, &githost.Error{Op: r.Op, Kind: githost.ErrStoppedBeforeWrite}
+	}
 	// The credential is the product's: it gets the caller's context, values included.
 	tok, err := c.cred.Token(ctx, githost.Scope{Repo: c.repo, Write: write})
 	if err != nil {

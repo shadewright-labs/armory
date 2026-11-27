@@ -35,12 +35,13 @@ const (
 	hRemaining = "X-RateLimit-Remaining"
 	hReset     = "X-RateLimit-Reset"
 	// at joins user information to a host in fixtures, so no fixture reads as an email address.
-	at            = "@"
-	template      = "/repos/{owner}/{repo}/things/{id}"
-	base          = 10 * time.Millisecond
-	hAPIVersion   = "X-Api-Version"
-	etagV1        = `"v1"`
-	caseRetryable = "retryable"
+	at               = "@"
+	template         = "/repos/{owner}/{repo}/things/{id}"
+	base             = 10 * time.Millisecond
+	hAPIVersion      = "X-Api-Version"
+	etagV1           = `"v1"`
+	caseRetryable    = "retryable"
+	caseUnauthorized = "unauthorized"
 )
 
 var fixedNow = time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)

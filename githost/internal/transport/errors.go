@@ -39,7 +39,9 @@ func finalError(op string, err error, mayHaveWritten bool) error {
 // outcomeUnknown matches githost.ErrOutcomeUnknown and cause, but never githost.ErrRetryable: the
 // caller reads state before it sends the write again. cause is an error of this package.
 func outcomeUnknown(op string, cause error) error {
-	if re, ok := errors.AsType[*githost.RetryableError](cause); ok {
+	// Only a RetryableError at the top is unwrapped: one inside a kindsError sits next to kinds that must
+	// stay, and a kindsError of this package holds none.
+	if re, ok := cause.(*githost.RetryableError); ok { //nolint:errorlint // only the top of the chain is unwrapped
 		cause = re.Err
 	}
 	return &kindsError{
@@ -72,23 +74,33 @@ func receiptError(ctx context.Context, op string, status int, cause error) error
 // refusedError is a refusal of the write check. Only the class of a valid *githost.Refusal in its
 // chain is kept, copied into a new Refusal; the check's text and identity are dropped.
 //
-// When the call's context ended during the check, the error also matches the end of the context, so a
-// caller that canceled learns it was its own cancellation; nothing was sent either way.
+// When the call's context ended during the check, the error also matches the end of the context
+// (context.Canceled or context.DeadlineExceeded), so a caller that canceled learns it was its own
+// cancellation; nothing was sent either way. The refusal wins: the error keeps its class, and it is
+// never retryable, even for a deadline.
 func refusedError(ctx context.Context, op string, err error) error {
 	stopped := &githost.Error{Op: op, Kind: githost.ErrStoppedBeforeWrite}
-	if ctx.Err() != nil {
-		end := ctxError(op, ctx)
-		return &kindsError{msg: stopped.Error() + ": " + end.Error(), kinds: []error{stopped, end}}
-	}
+	kinds := []error{stopped}
+	msg := stopped.Error()
 	var ref *githost.Refusal
-	if !errors.As(err, &ref) || ref == nil {
+	if errors.As(err, &ref) && ref != nil {
+		if kept := (&githost.Refusal{Class: string([]byte(ref.Class))}); kept.Valid() {
+			kinds = append(kinds, kept)
+			msg += ": " + kept.Error()
+		}
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		end := context.Canceled
+		if errors.Is(cerr, context.DeadlineExceeded) {
+			end = context.DeadlineExceeded
+		}
+		kinds = append(kinds, end)
+		msg += ": " + end.Error()
+	}
+	if len(kinds) == 1 {
 		return stopped
 	}
-	kept := &githost.Refusal{Class: string([]byte(ref.Class))}
-	if !kept.Valid() {
-		return stopped
-	}
-	return &kindsError{msg: stopped.Error() + ": " + kept.Error(), kinds: []error{stopped, kept}}
+	return &kindsError{msg: msg, kinds: kinds}
 }
 
 // transportError replaces an error of the HTTP client, which may hold the URL or answer text, with fixed
@@ -255,6 +267,18 @@ func validIfNoneMatch(s string) bool {
 	}
 }
 
+// validIfNoneMatchField reports whether the values of one If-None-Match field are valid together. The
+// values of a field are one comma-separated list on the wire (RFC 9110, section 5.3), so each value
+// passing alone is not enough: "*" next to any other value is a wildcard in a list.
+func validIfNoneMatchField(vs []string) bool {
+	for _, v := range vs {
+		if !validIfNoneMatch(v) {
+			return false
+		}
+	}
+	return validIfNoneMatch(strings.Join(vs, ", "))
+}
+
 func parseEntityTag(s string, i int) (int, bool) {
 	if strings.HasPrefix(s[i:], "W/") {
 		i += 2
@@ -304,17 +328,8 @@ func validIfModifiedSince(s string) bool {
 
 // hasValidCondition reports whether h carries a usable If-None-Match or If-Modified-Since validator.
 func hasValidCondition(h http.Header) bool {
-	if inm := h.Values("If-None-Match"); len(inm) > 0 {
-		valid := true
-		for _, v := range inm {
-			if !validIfNoneMatch(v) {
-				valid = false
-				break
-			}
-		}
-		if valid {
-			return true
-		}
+	if inm := h.Values("If-None-Match"); len(inm) > 0 && validIfNoneMatchField(inm) {
+		return true
 	}
 	if ims := h.Values("If-Modified-Since"); len(ims) == 1 && validIfModifiedSince(ims[0]) {
 		return true

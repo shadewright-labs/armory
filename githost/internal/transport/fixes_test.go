@@ -21,6 +21,8 @@ const (
 	hIfModifiedSince = "If-Modified-Since"
 	blankField       = " \t "
 	httpDate         = "Wed, 25 Nov 2026 12:00:00 GMT"
+	hIfNoneMatch     = "If-None-Match"
+	classPaused      = "paused"
 )
 
 // TestRedirectOnWrite: a 3xx answer to a write, a 303 after a POST above all, may follow a write the
@@ -463,6 +465,13 @@ func TestConditionalValidators(t *testing.T) {
 		{"wildcard in list", `*, "v1"`, nil, githost.ErrRejected},
 		{"space inside etag", `"v 1"`, nil, githost.ErrRejected},
 		{"header blank if-none-match", "", http.Header{"If-None-Match": {blankField}}, githost.ErrRejected},
+		{"header two etags", "", http.Header{hIfNoneMatch: {etagV1, `W/"v2"`}}, nil},
+		// The values of one field are one list on the wire (RFC 9110, section 5.3), so a wildcard next to
+		// another value is a wildcard in a list.
+		{"header wildcard and etag", "", http.Header{hIfNoneMatch: {"*", etagV1}}, githost.ErrRejected},
+		{"header duplicate wildcards", "", http.Header{hIfNoneMatch: {"*", "*"}}, githost.ErrRejected},
+		{"header mixed-case wildcard and etag", "", http.Header{
+			strings.ToLower(hIfNoneMatch): {"*"}, hIfNoneMatch: {etagV1}}, githost.ErrRejected},
 		{"invalid if-modified-since", "", http.Header{hIfModifiedSince: {"yesterday"}}, githost.ErrRejected},
 		{"blank if-modified-since", "", http.Header{hIfModifiedSince: {blankField}}, githost.ErrRejected},
 		{"rfc3339 if-modified-since", "", http.Header{hIfModifiedSince: {"2026-11-25T12:00:00Z"}}, githost.ErrRejected},
