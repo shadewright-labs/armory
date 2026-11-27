@@ -11,3 +11,4 @@ A decision that sets a package's boundary, its API contract, a security rule or 
 
 | ADR | Title | Status | Date |
 | --- | --- | --- | --- |
+| [0001](0001-git-host-clients.md) | Package `githost`, transport and credentials for one Git host origin | Proposed | 2026-11-26 |
