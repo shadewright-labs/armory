@@ -11,3 +11,4 @@ A decision that sets a package's boundary, its API contract, a security rule or 
 
 | ADR | Title | Status | Date |
 | --- | --- | --- | --- |
+| [ADR-0003](0003-redact-exact-held-secrets.md) | Package `redact/exact`, exact redaction of held secrets | Proposed | 2026-11-27 |
