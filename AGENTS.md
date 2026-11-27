@@ -17,7 +17,7 @@ A change that weakens one of these needs an ADR in `docs/adr/` first.
 Commits on `main` follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/): `type(scope)!: summary`. Pull requests are squash-merged with the title as the commit message, so the pull request title is what counts, and the required check `Conventional PR title` validates it.
 
 - Types: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`, `revert`.
-- The scope is optional. When used it is a package (`modelusage`, `githost`, `redact`, `audit`, `hygiene`) or one of `adr`, `ci`, `docs`, `deps`, `release`. A new package adds its scope to `.github/workflows/pr-title.yml`, the issue templates and this list in the same pull request.
+- The scope is optional. When used it is a package (`modelusage`, `githost`, `redact`, `audit`, `hygiene`, `netguard`, `waitart`) or one of `adr`, `ci`, `docs`, `deps`, `release`. A new package adds its scope to `.github/workflows/pr-title.yml`, the issue templates and this list in the same pull request.
 - The summary is in English, imperative, starts with a lower-case letter and has no final full stop.
 - Mark an incompatible change with `!` and a `BREAKING CHANGE:` footer that says what callers change.
 
