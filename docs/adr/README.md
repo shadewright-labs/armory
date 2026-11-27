@@ -11,4 +11,5 @@ A decision that sets a package's boundary, its API contract, a security rule or 
 
 | ADR | Title | Status | Date |
 | --- | --- | --- | --- |
-| [ADR-0005](0005-audit-chain-format.md) | Package `audit`, chain format, versions and tail anchor | Proposed | 2026-11-27 |
+| [0001](0001-git-host-clients.md) | Package `githost`, transport and credentials for one Git host origin | Accepted | 2026-11-27 |
+| [0005](0005-audit-chain-format.md) | Package `audit`, chain format, versions and tail anchor | Proposed | 2026-11-27 |
