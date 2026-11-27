@@ -9,7 +9,10 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -137,5 +140,122 @@ func TestCredentialFunc(t *testing.T) {
 	tok, err := c.Token(t.Context(), want)
 	if got != want || tok.IsZero() || err == nil {
 		t.Errorf("CredentialFunc passed %+v, returned %v, %v", got, tok, err)
+	}
+}
+
+// leaks reports whether s holds the canary, plainly or as Basic credentials would carry it.
+func leaks(s string) bool {
+	return strings.Contains(s, canary) ||
+		strings.Contains(s, base64.StdEncoding.EncodeToString([]byte(canary))) ||
+		strings.Contains(s, base64.StdEncoding.EncodeToString([]byte(":"+canary)))
+}
+
+// recordState is a fmt.State that keeps what Format writes.
+type recordState struct {
+	bytes.Buffer
+	flags string
+}
+
+func (*recordState) Width() (int, bool)     { return 0, false }
+func (*recordState) Precision() (int, bool) { return 0, false }
+func (s *recordState) Flag(c int) bool {
+	return c >= 0 && c < 128 && strings.IndexByte(s.flags, byte(c)) >= 0
+}
+func (s *recordState) Write(p []byte) (int, error) { return s.Buffer.Write(p) }
+
+// TestTokenEachVerb: for each of %v, %+v, %#v, %q, %s, %x and %d, a token of either scheme formats as
+// the placeholder when Format is called directly and through fmt, and leaves no trace of its value in
+// error text (wrapped, joined and printed with the verb), the log and slog packages, or a recovered
+// panic.
+func TestTokenEachVerb(t *testing.T) {
+	verbs := []struct {
+		verb  string
+		r     rune
+		flags string
+	}{
+		{"%v", 'v', ""}, {"%+v", 'v', "+"}, {"%#v", 'v', "#"}, {"%q", 'q', ""}, {"%s", 's', ""},
+		{"%x", 'x', ""}, {"%d", 'd', ""},
+	}
+	for _, scheme := range []Scheme{Bearer, Basic} {
+		tok := NewToken(scheme, canary, time.Time{})
+		if leaks(tok.String()) || leaks(tok.GoString()) || tok.String() != placeholder {
+			t.Fatalf("String %q, GoString %q", tok.String(), tok.GoString())
+		}
+		for _, v := range verbs {
+			t.Run(fmt.Sprintf("%d %s", scheme, v.verb), func(t *testing.T) {
+				var st recordState
+				st.flags = v.flags
+				tok.Format(&st, v.r)
+				if st.String() != placeholder {
+					t.Errorf("Format(%s) wrote %q, want the placeholder", v.verb, st.String())
+				}
+				out := map[string]string{
+					"Sprintf value":   fmt.Sprintf(v.verb, tok),
+					"Sprintf pointer": fmt.Sprintf(v.verb, &tok),
+				}
+				if got := out["Sprintf value"]; got != placeholder {
+					t.Errorf("Sprintf(%s) = %q, want the placeholder", v.verb, got)
+				}
+				base := fmt.Errorf("token "+v.verb, tok)
+				wrapped := fmt.Errorf("call: %w", base)
+				out["error"] = base.Error()
+				out["wrapped error"] = wrapped.Error()
+				out["joined error"] = errors.Join(errors.New("x"), base).Error()
+				out["error printed with the verb"] = fmt.Sprintf(v.verb, wrapped)
+				var logs bytes.Buffer
+				log.New(&logs, "", 0).Printf(v.verb, tok)
+				slog.New(slog.NewTextHandler(&logs, nil)).Error("m", "err", base, "tok", tok, "f", fmt.Sprintf(v.verb, tok))
+				slog.New(slog.NewJSONHandler(&logs, nil)).Error("m", "err", base, "tok", tok, "ptr", &tok)
+				out["logs"] = logs.String()
+				out["recovered panic"] = recovered(func() { panic(tok) }, v.verb)
+				out["recovered panic pointer"] = recovered(func() { panic(&tok) }, v.verb)
+				out["recovered panic error"] = recovered(func() { panic(base) }, v.verb)
+				for where, s := range out {
+					if leaks(s) {
+						t.Errorf("%s: token value in %.200q", where, s)
+					}
+				}
+			})
+		}
+	}
+}
+
+// recovered runs f, which panics, and formats the recovered value with verb.
+func recovered(f func(), verb string) (out string) {
+	defer func() { out = fmt.Sprintf(verb, recover()) }()
+	f()
+	return ""
+}
+
+// panicEnv names the variable that makes TestTokenUncaughtPanic panic in a child process.
+const panicEnv = "GITHOST_TOKEN_PANIC_CASE"
+
+// TestTokenUncaughtPanic: the runtime's own report of an uncaught panic, which prints a Stringer or error
+// with its method and any other value by type and address, holds no token value. Each case panics in a
+// child process of the test binary.
+func TestTokenUncaughtPanic(t *testing.T) {
+	cases := map[string]func(Token){
+		"value":   func(tok Token) { panic(tok) },
+		"address": func(tok Token) { panic(&tok) },
+		"struct":  func(tok Token) { panic(struct{ T Token }{tok}) },
+		"error":   func(tok Token) { panic(fmt.Errorf("wrapped: %v", tok)) },
+	}
+	if name := os.Getenv(panicEnv); name != "" {
+		cases[name](NewToken(Basic, canary, time.Time{}))
+		return
+	}
+	for name := range cases {
+		t.Run(name, func(t *testing.T) {
+			// #nosec G204 G702 -- runs this test binary again, with fixed arguments
+			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestTokenUncaughtPanic$", "-test.count=1")
+			cmd.Env = append(os.Environ(), panicEnv+"="+name)
+			out, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(out), "panic:") {
+				t.Fatalf("child did not panic: %v, %.300q", err, out)
+			}
+			if leaks(string(out)) {
+				t.Fatalf("token value in the panic report %.500q", out)
+			}
+		})
 	}
 }
