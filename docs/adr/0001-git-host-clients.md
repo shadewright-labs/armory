@@ -1,7 +1,7 @@
 # ADR-0001: Package `githost`, transport and credentials for one Git host origin
 
-- Status: Proposed
-- Date: 2026-11-26
+- Status: Accepted
+- Date: 2026-11-27
 
 This record decides what is built in armory pull request 29 and was not contested in three design reviews: the pinned-origin transport, the `Token` type, the credential and signer interfaces, the error kinds and the `retryafter` package. Each rule below names the test that checks it when the rule is about security. Typed GitHub calls, the final shape of the write check and the App installation-token source are not decided here; "Not decided here" lists where each one is.
 
