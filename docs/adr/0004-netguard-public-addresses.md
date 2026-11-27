@@ -1,6 +1,6 @@
 # ADR-0004: Package `netguard`, which IP addresses count as public and how the table stays current
 
-- Status: Proposed
+- Status: Accepted (2026-11-27)
 - Date: 2026-11-27
 
 This record decides the classification rule of the planned `netguard` package (epic 49, issue 50): which addresses a product may dial when it means "the public internet", how addresses that embed an IPv4 address are judged, what a product may widen and in which order the rules apply, how the guard runs at dial time, and how the range table is traced to the IANA registries and kept current. No code exists yet.
@@ -281,8 +281,8 @@ Test files are under `netguard/`.
 
 ## Open questions
 
-1. Should `netguard` accept network-specific NAT64 prefixes of the other RFC 6052 lengths (`/32` to `/64`)? Only `/96` is accepted until a product needs another length.
-2. Should the weekly registry check open an issue or only fail its job? The record says it opens one; that needs an issue-write token on a scheduled workflow.
+1. NAT64 prefix lengths: decided 2026-11-27. `netguard` accepts `/96` prefixes only. Other RFC 6052 lengths (`/32` to `/64`) are added when a product needs them; the change is additive.
+2. Weekly registry check: decided 2026-11-27. The workflow opens an issue on a difference. The job that downloads and compares the registries has no write permission. A second job has only `issues: write` on the default token and posts bounded row text. This is decided before the workflow pull request.
 
 ## Sources
 
