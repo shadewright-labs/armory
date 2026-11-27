@@ -1,6 +1,6 @@
 # ADR-0002: Package `redact`, pattern redaction moved from Shadewright
 
-- Status: Proposed
+- Status: Accepted (2026-11-27)
 - Date: 2026-11-27
 
 This record sets the boundary and the contract of `github.com/shadewright-labs/armory/redact` before any code moves (epic 40, issue 41). It builds on Shadewright [ADR-0048](https://github.com/shadewright-labs/shadewright/blob/main/docs/adr/0048-redaction-in-a-shared-module.md), which decided the two-stage move, the contract, version pinning and the dependency ceiling from Shadewright's side. This record states what Armory promises to every product and does not repeat the checks only Shadewright runs. Redaction of exact held values is a separate package and record (ADR-0003, `redact/exact`).
@@ -228,11 +228,11 @@ Sablecourt's `internal/redact` becomes a thin wrapper over `armory/redact` that 
 
 ## Open questions
 
-1. The `go` line: ADR-0048 point 5 is amended in Shadewright, raising Shadewright to go 1.27.4 (its toolchain is already go1.27.4, so only `GODEBUG` defaults change), as a precondition of Stage B. The amendment is Shadewright's decision, not this record's. The alternative is to lower Armory's line to 1.26.0 before the move.
-2. The second tier of the API: which names stay for v1.0.0. This record moves them all (except `WithWorkBudget`, which moves to `redacttest`), retires the release-before names with issue 922 and decides nothing else about v1.
-3. `Clean(String(s))`: run `FuzzString` with that check before the move. If it holds, it becomes a guarantee; if it fails, the record states the case and the check stays out.
-4. Advisory timing (point 9): publish the advisory after each product has released with the bump (proposed here, with the longer public-diff window as the cost), or at the next Armory release.
-5. Whether `AGENTS.md` records the reading of invariant 4 (see "Reading of invariant 4").
+1. The `go` line: decided 2026-11-27. Shadewright moves to go 1.27.4 by amending its ADR-0048 point 5, right after Shadewright 0.7.0 (Shadewright issue 1211) and before Stage B. The amendment is Shadewright's decision, not this record's.
+2. The second tier of the API: decided later, before v1.0.0. The default until then is that a name Sablecourt never calls is deprecated unless it is generalised.
+3. `Clean(String(s))`: decided 2026-11-27. It is a target, not a promise. `FuzzString` checks it before the move pull request, and the result is recorded there.
+4. Advisory timing (point 9): decided 2026-11-27. The advisory is published after both products have released the fix, and no later than 7 days after the Armory fix release.
+5. `AGENTS.md` and invariant 4: decided 2026-11-27. `AGENTS.md` gets one sentence saying that fixed package bounds stricter than any caller needs satisfy invariant 4, in a separate pull request.
 
 ## Sources
 
