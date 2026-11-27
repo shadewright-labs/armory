@@ -10,7 +10,7 @@ import "github.com/shadewright-labs/armory/modelusage"
 
 ## Go version
 
-`go.mod` specifies `go 1.26.0` (with `toolchain go1.27.4`). Armory currently uses only the Go standard library.
+`go.mod` specifies `go 1.27.4`. Armory currently uses only the Go standard library.
 
 ## Fetching before a tagged release
 
