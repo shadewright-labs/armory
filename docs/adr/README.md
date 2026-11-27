@@ -11,3 +11,4 @@ A decision that sets a package's boundary, its API contract, a security rule or 
 
 | ADR | Title | Status | Date |
 | --- | --- | --- | --- |
+| [ADR-0002](0002-redact-pattern-redaction.md) | Package `redact`, pattern redaction moved from Shadewright | Proposed | 2026-11-27 |
