@@ -1,6 +1,6 @@
 # ADR-0005: Package `audit`, chain format, versions and tail anchor
 
-- Status: Proposed
+- Status: Accepted (2026-11-27)
 - Date: 2026-11-27
 
 This record decides the format of the planned `audit` package (epic 54, issue 55): how an entry is encoded and hashed, how the chain starts, how a chain says whether it is keyed, how a verifier detects deletion of the newest entries, how a new anchor proves it extends the old one, what a verification run proves and on which snapshot, how a row says which rule it was written with, and the interfaces a product implements so its storage stays outside Armory. No code exists yet.
@@ -78,7 +78,7 @@ The time is recorded, not checked: a verifier does not require times to increase
 
 ### Keyed and unkeyed chains
 
-A chain is either SHA-256 or HMAC-SHA-256, and the choice is explicit: `Config.Algorithm` has no usable zero value, so a `Config` that does not name one is refused with `ErrInvalidConfig`. An HMAC chain needs a `Key`; an unset `Key` with `HMACSHA256` is refused, and so is a `Key` with `SHA256`. A secret store that hands back an empty key therefore stops `New`; it never yields an unkeyed chain.
+A chain is either SHA-256 or HMAC-SHA-256, and the choice is explicit: `Config.Algorithm` has no usable zero value, so a `Config` that does not name one is refused with `ErrInvalidConfig`. An HMAC chain needs a `Key`; an unset `Key` with `HMACSHA256` is refused, and so is a `Key` with `SHA256`. A secret store that hands back an empty key therefore stops `New`; it never yields an unkeyed chain. `KeyID` follows the same rule: it is required with `HMACSHA256`, refused with `SHA256`, and must use the character set of a chain ID, or `New` returns `ErrInvalidConfig`. `KeyID` is a label that proves nothing about the key: it names a key generation for the product's own bookkeeping, and a wrong key under the right `KeyID` is not detected by the label.
 
 The key is an opaque `Key`, built the way ADR-0001 builds a `Token`:
 
@@ -198,8 +198,9 @@ type Provisioned struct {
 // Chain is immutable after New and safe for concurrent use. It formats without its key.
 type Chain struct{ /* unexported */ }
 
-// New refuses a Config with an invalid chain ID, an algorithm and key that do not match, or a negative
-// or above-maximum limit, with ErrInvalidConfig.
+// New refuses a Config with an invalid chain ID, an algorithm and key that do not match, a KeyID that is
+// invalid, missing with HMACSHA256 or set with SHA256, or a negative or above-maximum limit, with
+// ErrInvalidConfig.
 func New(c Config) (*Chain, error)
 
 // Start is the head of an empty chain: Seq 0, Genesis, the chain's ID and algorithm.
@@ -335,7 +336,7 @@ A whole-chain verdict comes only from one `Verify` call on one snapshot. A call 
 
 `Tip`, `Provisioned`, `Insert`, `Rows`, `Next` and `Close` belong to the product, and their errors can carry a field value, a connection string or a wrapped secret. Armory does not return them. A callback error that matches `context.Canceled` or `context.DeadlineExceeded` with `errors.Is` is reduced to that bare sentinel; one that matches `ErrConflict` (the product's mapping of a unique-key violation, a serialisation failure or a lock timeout) is reduced to `ErrConflict`; every other callback error becomes `ErrStorage`. `Append` returns the reduced error directly. `Verify` and `Extends` always return it inside a `VerifyError` with the `Seq` being read, so `errors.Is(err, context.Canceled)` holds through `Unwrap`, and never as a bare value. A `Next` error other than exact `io.EOF` is a storage error. An error from `Close` after a scan that otherwise succeeded fails the call, reduced the same way, because a failed release can mean the snapshot was not what the scan assumed; after an earlier error, the first error is kept and the `Close` error is dropped. The product's original error is dropped, not wrapped, so no `Unwrap` chain reaches it; this is the rule ADR-0001 applies to credential and write-check errors. A product that needs the cause logs it inside its own callback before returning.
 
-Armory's own error text never contains a field name, a field value, a hash, a key, a chain ID or text it parsed. A `Reader` that returns rows out of order, repeats a row, or returns more than the range holds gets `ErrGap` or `ErrLimit`, not a wrong verdict.
+Armory's own error text never contains a field name, a field value, a hash, a key, a `KeyID`, a chain ID or text it parsed. A `Reader` that returns rows out of order, repeats a row, or returns more than the range holds gets `ErrGap` or `ErrLimit`, not a wrong verdict.
 
 ### Storage stays outside
 
@@ -450,11 +451,11 @@ Test files are under `audit/`.
 - `TestExtends`: the row at `prev.Seq` missing gives `ErrTruncated`; that row with only its stored `Hash` changed, or with a field changed, gives `ErrAnchorMismatch`; `prev.Seq == next.Seq` with different hashes gives `ErrAnchorMismatch`; a version 1 row after a `prev` at a version 2 row gives `ErrVersionOrder`; `Result.From` is `prev.Seq`. A prefix row deleted after `prev` was taken is not detected by `Extends` and is detected by `Verify`, which the test records as the stated limit.
 - `TestAnchorPublication` (over the in-memory store and a reference publisher in the test file): the anchor at 10, the store restored to 9, two appends writing a different 10 and an 11: publishing 11 fails and the anchor stays at the old 10. Publications of 10 and 11 in either order leave 11. A publication across a crash gap (anchor 5, head 9) reads and checks rows 6 to 9. No stored anchor with no publication record starts from `Start()`; no stored anchor with a publication record gives `ErrNoAnchor` and writes nothing. A key change swaps the anchor only when the new entry 1 names the stored old head in `prev.head`, and leaves it otherwise.
 - `TestAppendTip`: a `SHA256` writer on an HMAC chain, an HMAC writer with another key, a writer with another chain ID, and a tip whose stored `Hash` was edited each give `ErrTipMismatch` and insert nothing; a tip of an unknown version gives `ErrUnknownVersion`; a tip at `MaxSeq` gives `ErrLimit`; on an empty chain, a `Config` whose chain ID, algorithm or `KeyID` differs from the provisioned record gives `ErrNotProvisioned` and inserts nothing; an oversized tip row gives an error from `Tip` before its payload is fetched.
-- `TestKeyed`: `Config` with no algorithm, `HMACSHA256` with an unset `Key`, and `SHA256` with a `Key` give `ErrInvalidConfig`; `NewKey` refuses 31 and 33 bytes and keeps its own copy when the caller clears its slice; a keyed chain verified by a `SHA256` chain fails at the anchor with `ErrInvalidHead`, and fails at row 1 with `ErrTampered` when given an unkeyed anchor.
+- `TestKeyed`: `Config` with no algorithm, `HMACSHA256` with an unset `Key`, `SHA256` with a `Key`, `HMACSHA256` with an empty or invalid `KeyID`, and `SHA256` with a `KeyID` give `ErrInvalidConfig`; `NewKey` refuses 31 and 33 bytes and keeps its own copy when the caller clears its slice; a keyed chain verified by a `SHA256` chain fails at the anchor with `ErrInvalidHead`, and fails at row 1 with `ErrTampered` when given an unkeyed anchor.
 - Tamper suite over an in-memory store: edit of any field value, field name, time, version or hash; reorder of two rows; insert of a row; deletion of a middle row; a row copied from another chain; a fork with two rows at one `Seq`; an anchor from another chain; an anchor whose hash differs at its `Seq`. Each fails with the error named above, matched with `errors.Is` and `errors.As`, and the `Seq` the rules above give.
 - `TestReaderMisbehaves`: out-of-order, repeated and extra rows from the `Reader` give `ErrGap` or `ErrLimit`; an oversized last row reported by `Next` as an error is not taken as the end.
 - `TestStorageErrors`: each callback (`Tip`, `Provisioned`, `Insert`, `Rows`, `Next`, `Close`) returns an error that nests a synthetic secret several `Unwrap` levels deep, and the returned error matches `ErrStorage` and contains no secret with `%v`, `%+v`, `%#v` or along its whole `errors.Unwrap` chain; a nested `context.Canceled` or `context.DeadlineExceeded` is reduced to the bare sentinel from `Append` and to a `VerifyError` wrapping that sentinel from `Verify` and `Extends`, and a nested `ErrConflict` likewise, with no product text. A `Close` error after a fully successful scan fails `Verify` with `ErrStorage`; after an earlier error, the earlier error is returned. A `Next` that returns a wrapped `io.EOF` is `ErrStorage`, not the end.
-- `TestErrorText`: no error, through its whole `Unwrap` chain and with `%v`, `%+v` and `%#v`, contains a field name, a field value, a hash, the key or the chain ID, including the errors of `ParseHash`, `Head.UnmarshalText` and `NewKey`.
+- `TestErrorText`: no error, through its whole `Unwrap` chain and with `%v`, `%+v` and `%#v`, contains a field name, a field value, a hash, the key, the `KeyID` or the chain ID, including the errors of `ParseHash`, `Head.UnmarshalText` and `NewKey`.
 - `TestKeyNeverPrints`: `Key`, `Config` and `Chain` print and marshal no key material with any `fmt` verb or through `json`, `xml`, `gob` and `slog`, as a value, pointer, exported field, unexported field of a caller's struct, slice or map element. The check searches the output for the key in raw, hex (both cases), decimal byte list and base64 form.
 - `FuzzVerify`: random stored rows through a fake `Reader` never panic. The oracle rebuilds the chain from Genesis over the same times and fields: `Verify` succeeds only when every row up to the target equals the rebuilt one and the anchor matches.
 - `FuzzHeadText` and `FuzzParseHash`: strict parsing, round trip, no panic; `FuzzHeadText` seeds include a 182-byte head and a `Seq` of `MaxSeq+1`.
@@ -462,10 +463,11 @@ Test files are under `audit/`.
 
 ## Open questions
 
-1. Where Sablecourt stores the anchor in citadel mode (a Kubernetes object, an external log, a record signed with a device key). That is Sablecourt's decision; this record requires only that it is outside the table and that publication follows the steps above.
-2. Should `Verify` accept a list of older anchors and report the first that no longer matches? It would show when a change happened, at the cost of a wider API.
-3. Is a chain ID needed per tenant or per category, or is one chain per product enough? The format allows either; the products decide.
-4. Key rotation inside one chain (a field that announces the next key) is left out. A new chain whose first entry carries `prev.head` covers it today.
+1. Anchor store in citadel mode: decided 2026-11-27. It is Sablecourt's decision, made before citadel mode ships. This record requires only that the anchor is outside the table and that publication follows the steps above.
+2. A list of older anchors in `Verify`: decided 2026-11-27. There is none. A product can `Verify` against an older anchor itself, and a list can be added later without breaking the API.
+3. Chains per tenant or category: decided 2026-11-27. One chain per product store is the default, and the product decides if it needs more.
+4. Key rotation inside one chain: decided 2026-11-27. It is left out. A new chain whose first entry carries `prev.head` covers it; a new ADR is needed if that ever falls short.
+5. `KeyID` and `Provisioned`: decided 2026-11-27. They are accepted as part of the API, not the entry format, and may change before v1.0.0.
 
 ## Sources
 
