@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-11-26
 
-This record decides what is built on branch `feat/githost-core` of armory and was not contested in three design reviews: the pinned-origin transport, the `Token` type, the credential and signer interfaces, the error kinds and the `retryafter` package. Each rule below names the test that checks it when the rule is about security. Typed GitHub calls, the final shape of the write check and the App installation-token source are not decided here; "Not decided here" lists where each one is.
+This record decides what is built in armory pull request 29 and was not contested in three design reviews: the pinned-origin transport, the `Token` type, the credential and signer interfaces, the error kinds and the `retryafter` package. Each rule below names the test that checks it when the rule is about security. Typed GitHub calls, the final shape of the write check and the App installation-token source are not decided here; "Not decided here" lists where each one is.
 
 ## Context
 
@@ -74,6 +74,10 @@ Fixed now:
 - A refusal stops the call and nothing more is sent; the error matches `ErrStoppedBeforeWrite`. A nil check refuses every write (`TestNilWriteCheckAllowsNoWrite`).
 - A refusal carries only a class: a `*Refusal` found in the check's error whose `Class` is 1 to 32 lowercase ASCII letters, digits and dashes is copied into a new `Refusal`. The check's text and error are dropped, and an invalid class is dropped too (`outcome_test.go`, `TestRefusalClass`; `errors_test.go`, `TestRefusalValid`).
 
+## Reading of invariant 3
+
+Note, 2026-11-27. Invariant 3 says Armory makes network calls only when that is the package's whole purpose and "the caller supplies the client", and that parsers read within "limits the caller sets". `githost` builds its own HTTP transport and has its own defaults (body limit, timeouts, attempts). This is a deliberate reading of the invariant, not a weakening of it. The purpose of the rule is that Armory cannot reach a host the caller did not choose, cannot read a credential on its own and cannot leak one. The package keeps all three: the caller supplies the host and every `Token` through `Credential`, and Armory reads no environment variable, file or proxy setting. A client the caller built would instead let a dial hook, a redirect policy, a proxy or an HTTP/2 debug log see the `Authorization` header, which is the leak the rule exists to prevent. The defaults are limits too: each is a field the caller can set (`Limit`, `BodyLimit`, `Timeout`, `AttemptTimeout`, `MaxAttempts`). The caller's own client is replaced by one the package builds, and `Config.RoundTripper` is internal for the same reason.
+
 ## Repository identity
 
 `RepoRef` has `Host`, `Owner`, `Project` (Azure DevOps; empty on GitHub), `Name` and `ID`. `ID` is configuration: the product supplies the host's immutable repository ID with the names, and the client does not learn it from the host. The built transport passes `RepoRef` to the credential in `Scope` and does nothing else with it. Comparing `ID` with the host's answers comes with the typed calls.
@@ -112,10 +116,10 @@ Writes addressed by owner and name race against a rename, transfer or recreation
 ## Consequences
 
 - Both products can share one transport and one token type once the typed calls exist. Until then the built code is a library with no exported client.
-- Armory holds no authorization. Each product builds its own on the write check.
+- Armory holds no authorization. The write check is a stop switch: it sees `Op`, `Method`, `Template` and `Attempt`, not the path or the body. Each product authorizes before it makes the typed call, and the check can only stop what the product already allowed.
 - A fix reaches a product when it bumps its armory version, so an urgent fix waits for both bumps.
 - A bug in the transport affects both products' write paths. The transport tests, the contract suite of issue 11 and each product's own tests stand against it.
-- Armory gains a public API, kept compatible from `v1`. The pull request title check and `AGENTS.md` need a `githost` scope (issue 22).
+- Armory gains a public API, kept compatible from `v1`.
 
 ## Security consequences
 
@@ -135,7 +139,7 @@ The products keep: choosing and restricting the credential, which closes the nam
 ## Recorded decisions
 
 1. GitHub Enterprise Server is not supported now. Neither product needs it, and a configurable host would widen the credential boundary.
-2. Signed commits are out of scope for now: a commit recreated on the host without its signature has another ID.
+2. Signed commits are out of scope for now: a commit recreated on the host without its signature has another ID. Sablecourt's branch push (its issue 133) therefore pushes unsigned commits or uses the git command line, not this package's API calls.
 3. Comments stay host-specific. Shadewright's marker depends on GitHub App identity and paging.
 4. Webhook verification stays in the receiving products.
 5. Shadewright keeps its `GitProvider` fake.
@@ -144,9 +148,9 @@ The products keep: choosing and restricting the credential, which closes the nam
 
 ## Stages
 
-**Stage A.** The five parts above are built on `feat/githost-core`. Then the per-call work: each typed call in its own pull request with its design notes in the issue, the App source (issue 21) and the fixture server and contract suite (issue 11). Sablecourt adopts the transport first for its opener, through the open-pull-request call, which drops the configurable URL, redirect following and unbounded reads. Release controls (issue 22) are in place before Sablecourt's first pin (issue 19).
+**Stage A.** The five parts above are built in pull request 29. Then the per-call work: each typed call in its own pull request with its design notes in the issue, the App source (issue 21) and the fixture server and contract suite (issue 11). Sablecourt adopts the transport first for its opener, through the open-pull-request call, which drops the configurable URL, redirect following and unbounded reads. Release controls (issue 22) are in place before Sablecourt's first pin (issue 19).
 
-**Stage B.** Shadewright moves its transport and App authentication onto the package once the calls it needs exist, and keeps its adapter logic, gate and proofs. The pull request for that move lists and tests each behaviour difference.
+**Stage B.** Shadewright moves its transport and App authentication onto the package once the calls it needs exist, and keeps its adapter logic, gate and proofs. It is not a change with no behaviour difference. Shadewright's default transport today is a clone of `http.DefaultTransport` (`internal/providers/github/client.go`, `newHTTPClient`), so it takes the proxy from the environment (`HTTPS_PROXY`, `NO_PROXY`) and negotiates HTTP/2. The package transport does neither: it uses no proxy unless the caller sets `Config.Proxy`, which is internal today, and it speaks HTTP/1.1 only. When Shadewright switches it must check whether any deployment relies on an environment proxy (and then needs `Config.Proxy` exported with `http.ProxyFromEnvironment`, a change under invariant 5), that no part of it needs HTTP/2 features, and that connection reuse and latency under HTTP/1.1 stay acceptable. The pull request for that move lists and tests each behaviour difference.
 
 ## Issue dispositions
 
@@ -159,7 +163,7 @@ Armory issues, epic 7:
 
 Read on 2026-11-26.
 
-- Armory, branch `feat/githost-core`: `githost/` (all files, tests included).
+- Armory, pull request 29: `githost/` (all files, tests included).
 - GitHub REST API (version 2022-11-28): [Pulls](https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28), [Check runs](https://docs.github.com/en/rest/checks/runs?apiVersion=2022-11-28), [Commit statuses](https://docs.github.com/en/rest/commits/statuses?apiVersion=2022-11-28), [Git commits](https://docs.github.com/en/rest/git/commits?apiVersion=2022-11-28).
 - Azure DevOps REST API 7.1: [Pushes - Create](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pushes/create?view=azure-devops-rest-7.1), [Refs - Update Refs](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/refs/update-refs?view=azure-devops-rest-7.1), [Pull Requests - Update](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/update?view=azure-devops-rest-7.1).
 - Shadewright, on `main`: `internal/providers/github/`, [ADR-0048](https://github.com/shadewright-labs/shadewright/blob/main/docs/adr/0048-redaction-in-a-shared-module.md). Sablecourt, on `main`: `internal/gate/mcp/`, `cmd/sablecourtd/main.go`.
