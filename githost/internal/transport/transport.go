@@ -274,6 +274,10 @@ type Request struct {
 	// Idempotent marks a write that may be sent again in the call, such as a content-addressed object or a
 	// ref move with an expected old value. Reads are always retried; a write without it is sent once.
 	Idempotent bool
+
+	// cursorPage counts the pages [Client.NextPage] reached by cursor before this request, so a host that
+	// keeps handing out new cursors cannot lead a caller through more than maxPage pages.
+	cursorPage int
 }
 
 // Response is a non-error answer from [Client.Do]: a 2xx, a 304 to a conditional GET or HEAD, or a

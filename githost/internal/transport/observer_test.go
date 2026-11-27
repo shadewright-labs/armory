@@ -204,7 +204,7 @@ func TestNextPage(t *testing.T) {
 			wantErr: githost.ErrUntrustedAnswer},
 		{name: "no page", links: []string{`<https://api.example.test/x?per_page=3>; rel="next"`},
 			wantErr: githost.ErrUntrustedAnswer},
-		{name: "cursor", links: []string{`<https://api.example.test/x?after=Y3Vy>; rel="next"`},
+		{name: "cursor after a page", current: "2", links: []string{`<https://api.example.test/x?after=Y3Vy>; rel="next"`},
 			wantErr: githost.ErrUntrustedAnswer},
 		{name: "zero", links: []string{link("0")}, wantErr: githost.ErrUntrustedAnswer},
 		{name: "negative", links: []string{link("-2")}, wantErr: githost.ErrUntrustedAnswer},
@@ -274,13 +274,16 @@ func TestNextPage(t *testing.T) {
 	}
 }
 
-// FuzzNextPage: no Link header panics, and a next page is always the current one plus one, with the
-// rest of the request unchanged.
+// FuzzNextPage: no Link header panics, and a next page is always the current one plus one, or a valid
+// cursor on a request that had no page, with the rest of the request unchanged.
 func FuzzNextPage(f *testing.F) {
 	f.Add("", `<https://api.example.test/x?page=2>; rel="next"`)
 	f.Add("3", `<https://api.example.test/x?page=4>; rel="next", <https://api.example.test/x?page=9>; rel="last"`)
 	f.Add("1", `<https://api.example.test/x?page=2&page=2>; rel=next`)
 	f.Add("1", `<https://api.example.test/x?page=%32>; rel="prev next"`)
+	f.Add("", `<https://api.example.test/x?after=Y3Vy%3D>; rel="next"`)
+	f.Add("2", `<https://api.example.test/x?after=Y3Vy>; rel="next"`)
+	f.Add("", `<https://api.example.test/x?after=a&page=2>; rel="next"`)
 	c, err := New(Config{Host: apiHost, Credential: githost.CredentialFunc(
 		func(context.Context, githost.Scope) (githost.Token, error) { return githost.Token{}, nil })})
 	if err != nil {
@@ -300,6 +303,18 @@ func FuzzNextPage(f *testing.F) {
 		}
 		if err != nil {
 			t.Fatalf("NextPage = ok with %v", err)
+		}
+		if after := next.Query[cursorParam]; len(after) > 0 {
+			if current != "" || len(after) != 1 || !validCursor(after[0]) || next.Query.Has(pageParam) ||
+				next.cursorPage != 1 {
+				t.Fatalf("NextPage from %q = %+v", current, next)
+			}
+			next.Query.Del(cursorParam)
+			next.cursorPage = 0
+			if !reflect.DeepEqual(next, r) {
+				t.Fatalf("NextPage changed the request: %+v", next)
+			}
+			return
 		}
 		cur := 1
 		if current != "" {

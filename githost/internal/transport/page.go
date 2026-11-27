@@ -100,43 +100,104 @@ func allIn(s, set string) bool {
 const (
 	// pageParam is the query parameter of a page number.
 	pageParam = "page"
-	// maxPage bounds the page number a paged answer may lead to.
+	// cursorParam is the query parameter of a page cursor.
+	cursorParam = "after"
+	// maxPage bounds the page number a paged answer may lead to, and the number of pages a chain of
+	// cursors may lead through.
 	maxPage = 1000
+	// maxCursor bounds the length of a cursor in bytes, once decoded.
+	maxCursor = 512
 )
 
-// NextPage reads the rel="next" link of an answer to r and returns the request for the next page: r
-// with its "page" query parameter one higher (a request without one is page 1), on the pinned origin.
-// Only the page number is read from the link; its URL is never followed or kept. ok is false on the
-// last page.
+// NextPage reads the rel="next" link of an answer to r and returns the request for the next page, rebuilt
+// from r on the pinned origin. The link's URL is never followed or kept: only its page parameter is read
+// from it, and its path, host and other parameters are dropped. ok is false on the last page.
+//
+// A link carries either a page number or a cursor. With a page number, the next request is r with its
+// "page" query parameter one higher (a request without one is page 1). With a cursor, the next request
+// is r with its "after" query parameter set to the link's: 1 to 512 bytes of ASCII letters, digits and
+// "+", "/", "=", "_", "-", ".", "~" and ":" once decoded. A chain of cursors leads through at most
+// maxPage pages, counted on the requests NextPage returns.
 //
 // An unbalanced bracket or quote in a Link header, a link off the pinned origin, a second rel="next"
-// link, a missing, repeated or malformed page number (only 1 to maxPage, in decimal without sign or
-// leading zero), or a page that is not the current one plus one (a skip, a repeat or a step back, so no
-// sequence of pages can cycle) is githost.ErrUntrustedAnswer. A request whose operation label is not a
-// valid label, or whose own page number is repeated or malformed, is githost.ErrRejected; an invalid
-// operation label is replaced with a fixed one.
+// link, a link with both a page and a cursor or with neither, a missing, repeated or malformed page
+// number (only 1 to maxPage, in decimal without sign or leading zero), a page that is not the current
+// one plus one (a skip, a repeat or a step back, so no sequence of pages can cycle), a repeated or
+// malformed cursor, the cursor r already carries, a change from pages to cursors or back, or a cursor
+// past maxPage pages is githost.ErrUntrustedAnswer. A request whose operation label is not a valid
+// label, whose own page number or cursor is repeated or malformed, or that carries both, is
+// githost.ErrRejected; an invalid operation label is replaced with a fixed one.
 func (c *Client) NextPage(r Request, h http.Header) (next Request, ok bool, err error) {
 	if !validOp(r.Op) {
 		return Request{}, false, &githost.Error{Op: opDo, Kind: githost.ErrRejected}
 	}
-	current := 1
-	if vs, has := r.Query[pageParam]; has {
-		n, valid := 0, len(vs) == 1
-		if valid {
-			n, valid = parsePage(vs[0])
-		}
-		if !valid {
-			return Request{}, false, &githost.Error{Op: r.Op, Kind: githost.ErrRejected}
-		}
-		current = n
+	current, cursor, hasCursor, valid := position(r.Query)
+	if !valid {
+		return Request{}, false, &githost.Error{Op: r.Op, Kind: githost.ErrRejected}
 	}
 	untrusted := &githost.Error{Op: r.Op, Kind: githost.ErrUntrustedAnswer}
-	page, found := "", false
+	target, found, trusted := c.nextLink(h)
+	if !trusted {
+		return Request{}, false, untrusted
+	}
+	if !found {
+		return Request{}, false, nil
+	}
+	pages, cursors := target[pageParam], target[cursorParam]
+	next = r.frozen()
+	switch {
+	case len(pages) == 1 && len(cursors) == 0 && !hasCursor:
+		n, valid := parsePage(pages[0])
+		if !valid || n != current+1 {
+			return Request{}, false, untrusted
+		}
+		next.Query = orNew(next.Query)
+		next.Query.Set(pageParam, strconv.Itoa(n))
+	case len(cursors) == 1 && len(pages) == 0 && !r.Query.Has(pageParam):
+		// The first page is the request that carries no cursor, so the request after r is page
+		// r.cursorPage+2.
+		if !validCursor(cursors[0]) || (hasCursor && cursors[0] == cursor) || r.cursorPage+2 > maxPage {
+			return Request{}, false, untrusted
+		}
+		next.Query = orNew(next.Query)
+		next.Query.Set(cursorParam, cursors[0])
+		next.cursorPage = r.cursorPage + 1
+	default:
+		return Request{}, false, untrusted
+	}
+	return next, true, nil
+}
+
+// position reads the page number (1 when absent) and the cursor of a request's query. valid is false when
+// either is repeated or malformed, or the query carries both.
+func position(q url.Values) (page int, cursor string, hasCursor, valid bool) {
+	page = 1
+	if vs, has := q[pageParam]; has {
+		if len(vs) != 1 {
+			return 0, "", false, false
+		}
+		if page, valid = parsePage(vs[0]); !valid {
+			return 0, "", false, false
+		}
+	}
+	if vs, has := q[cursorParam]; has {
+		if len(vs) != 1 || !validCursor(vs[0]) || q.Has(pageParam) {
+			return 0, "", false, false
+		}
+		cursor, hasCursor = vs[0], true
+	}
+	return page, cursor, hasCursor, true
+}
+
+// nextLink returns the query of the one rel="next" link in h. found is false when there is none, and
+// trusted is false for an unbalanced bracket or quote, a second next link, a target that is not in
+// brackets, a link off the pinned origin or a query that does not parse.
+func (c *Client) nextLink(h http.Header) (query url.Values, found, trusted bool) {
 	for _, link := range h.Values("Link") {
 		// Commas and semicolons split the field only outside a <URI> and a quoted string.
 		links, balanced := splitOutside(link, ',')
 		if !balanced {
-			return Request{}, false, untrusted
+			return nil, false, false
 		}
 		for _, part := range links {
 			fields, _ := splitOutside(part, ';')
@@ -144,38 +205,40 @@ func (c *Client) NextPage(r Request, h http.Header) (next Request, ok bool, err 
 				continue
 			}
 			if found {
-				return Request{}, false, untrusted
+				return nil, false, false
 			}
 			found = true
-			target := strings.TrimSpace(fields[0])
-			if !strings.HasPrefix(target, "<") || !strings.HasSuffix(target, ">") {
-				return Request{}, false, untrusted
+			ref := strings.TrimSpace(fields[0])
+			if !strings.HasPrefix(ref, "<") || !strings.HasSuffix(ref, ">") {
+				return nil, false, false
 			}
-			u, perr := url.Parse(target[1 : len(target)-1])
+			u, perr := url.Parse(ref[1 : len(ref)-1])
 			if perr != nil || !onOrigin(u, c.host) {
-				return Request{}, false, untrusted
+				return nil, false, false
 			}
 			q, qerr := url.ParseQuery(u.RawQuery)
-			if qerr != nil || len(q[pageParam]) != 1 {
-				return Request{}, false, untrusted
+			if qerr != nil {
+				return nil, false, false
 			}
-			page = q[pageParam][0]
+			query = q
 		}
 	}
-	if !found {
-		return Request{}, false, nil
+	return query, found, true
+}
+
+// orNew returns q, or an empty url.Values when q is nil.
+func orNew(q url.Values) url.Values {
+	if q == nil {
+		return url.Values{}
 	}
-	n, valid := parsePage(page)
-	if !valid || n != current+1 {
-		return Request{}, false, untrusted
-	}
-	next = r
-	next.Query = make(url.Values, len(r.Query)+1)
-	for k, vs := range r.Query {
-		next.Query[k] = append([]string(nil), vs...)
-	}
-	next.Query.Set(pageParam, strconv.Itoa(n))
-	return next, true, nil
+	return q
+}
+
+// validCursor reports whether s is a cursor NextPage takes: 1 to maxCursor bytes of ASCII letters,
+// digits and "+/=_-.~:", the characters of base64 and the cursors hosts send.
+func validCursor(s string) bool {
+	return s != "" && len(s) <= maxCursor &&
+		allIn(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=_-.~:")
 }
 
 // parsePage reads a page number from 1 to maxPage, in decimal without sign or leading zero.
