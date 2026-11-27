@@ -1,0 +1,994 @@
+package modelusage
+
+import (
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"testing/iotest"
+)
+
+var testLimits = Limits{MaxBytes: 1 << 20, MaxLineBytes: 64 << 10, MaxTokens: 1 << 40}
+
+func openFixture(t *testing.T, name string) *os.File {
+	t.Helper()
+	f, err := os.Open(filepath.Join("testdata", name)) //nolint:gosec // G304: the names are fixtures of this test
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	return f
+}
+
+func TestParseJSONFixtures(t *testing.T) {
+	tests := []struct {
+		file    string
+		family  Family
+		want    Usage
+		wantErr error
+	}{
+		{file: "anthropic-reply.json", family: Anthropic, want: Usage{Family: Anthropic, InputTokens: 25,
+			OutputTokens: 15}},
+		{file: "anthropic-reply-cache.json", family: Anthropic, want: Usage{Family: Anthropic, InputTokens: 50,
+			OutputTokens: 503, CacheCreationInputTokens: 248, CacheReadInputTokens: 1800,
+			CacheCreation5mInputTokens: 148, CacheCreation1hInputTokens: 100}},
+		{file: "anthropic-reply-compaction.json", family: Anthropic, want: Usage{Family: Anthropic,
+			InputTokens: 23000, OutputTokens: 1000, CacheCreationInputTokens: 200, CacheReadInputTokens: 1000,
+			CompactionInputTokens: 180000, CompactionOutputTokens: 3500, CompactionCacheCreationInputTokens: 400,
+			CompactionCacheCreation5mInputTokens: 300, CompactionCacheCreation1hInputTokens: 100,
+			CompactionCacheReadInputTokens: 50000}},
+		{file: "anthropic-reply-advisor.json", family: Anthropic, want: Usage{Family: Anthropic,
+			InputTokens: 1760, OutputTokens: 531, CacheReadInputTokens: 412,
+			AdvisorInputTokens: 823, AdvisorOutputTokens: 1612}},
+		{file: "anthropic-reply-thinking.json", family: Anthropic, want: Usage{Family: Anthropic, InputTokens: 30,
+			OutputTokens: 420, ReasoningTokens: 380}},
+		{file: "anthropic-reply-null-cache.json", family: Anthropic, want: Usage{Family: Anthropic, InputTokens: 12,
+			OutputTokens: 7}},
+		{file: "anthropic-reply-zero.json", family: Anthropic, want: Usage{Family: Anthropic}},
+		{file: "anthropic-reply-no-usage.json", family: Anthropic, wantErr: ErrNoUsage},
+		{file: "anthropic-reply-negative.json", family: Anthropic, wantErr: ErrOutOfRange},
+		{file: "chat-reply.json", family: OpenAIChat, want: Usage{Family: OpenAIChat, InputTokens: 19,
+			OutputTokens: 10, ReportedTotalTokens: 29}},
+		{file: "chat-reply-cache.json", family: OpenAIChat, want: Usage{Family: OpenAIChat, InputTokens: 2006,
+			OutputTokens: 300, CachedPromptTokens: 1920, ReasoningTokens: 192, ReportedTotalTokens: 2306}},
+		{file: "chat-reply-minimal.json", family: OpenAIChat, want: Usage{Family: OpenAIChat, InputTokens: 8,
+			OutputTokens: 4, ReportedTotalTokens: 12}},
+		{file: "chat-reply-cached-above-prompt.json", family: OpenAIChat, wantErr: ErrOutOfRange},
+		{file: "chat-reply-total-below-parts.json", family: OpenAIChat, wantErr: ErrOutOfRange},
+		// A chat reply holds prompt_tokens and completion_tokens; the Responses names are not read for it.
+		{file: "chat-reply-input-names.json", family: OpenAIChat, wantErr: ErrNoUsage},
+		{file: "responses-reply.json", family: OpenAIResponses, want: Usage{Family: OpenAIResponses, InputTokens: 75,
+			OutputTokens: 1186, ReasoningTokens: 1024, ReportedTotalTokens: 1261}},
+		{file: "responses-reply-cache.json", family: OpenAIResponses, want: Usage{Family: OpenAIResponses,
+			InputTokens: 12000, OutputTokens: 20, CachedPromptTokens: 4000, CacheWritePromptTokens: 7000,
+			CacheWrite30mPromptTokens: 3000, CacheWrite12hPromptTokens: 4000, ReportedTotalTokens: 12020}},
+		{file: "responses-reply-in-progress.json", family: OpenAIResponses, wantErr: ErrTruncated},
+		{file: "responses-reply-chat-usage.json", family: OpenAIResponses, wantErr: ErrNoUsage},
+		// The usage block of each family is read only under that family.
+		{file: "anthropic-reply.json", family: OpenAIChat, wantErr: ErrNoUsage},
+		{file: "chat-reply.json", family: Anthropic, wantErr: ErrNoUsage},
+	}
+	for _, tt := range tests {
+		t.Run(tt.file+"/"+tt.family.String(), func(t *testing.T) {
+			got, err := ParseJSON(tt.family, openFixture(t, tt.file), testLimits)
+			if !errors.Is(err, tt.wantErr) || (tt.wantErr == nil && err != nil) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("usage = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseStreamFixtures(t *testing.T) {
+	tests := []struct {
+		file    string
+		family  Family
+		want    Usage
+		wantErr error
+	}{
+		{file: "anthropic-stream.sse", family: Anthropic, want: Usage{Family: Anthropic, InputTokens: 25,
+			OutputTokens: 15}},
+		{file: "anthropic-stream-cache.sse", family: Anthropic, want: Usage{Family: Anthropic, InputTokens: 40,
+			OutputTokens: 120, CacheReadInputTokens: 2600}},
+		{file: "anthropic-stream-compaction.sse", family: Anthropic, want: Usage{Family: Anthropic, InputTokens: 23000,
+			OutputTokens: 1000, CompactionInputTokens: 180000, CompactionOutputTokens: 3500,
+			CompactionCacheReadInputTokens: 50000}},
+		{file: "anthropic-stream-advisor.sse", family: Anthropic, want: Usage{Family: Anthropic, InputTokens: 1760,
+			OutputTokens: 531, CacheReadInputTokens: 412, AdvisorInputTokens: 823, AdvisorOutputTokens: 1612}},
+		// Usage reported in message_start and in two message_delta events: each present count of a later
+		// block replaces the earlier one, as the counts are cumulative.
+		{file: "anthropic-stream-delta-input.sse", family: Anthropic, want: Usage{Family: Anthropic, InputTokens: 10682,
+			OutputTokens: 510, CacheReadInputTokens: 512}},
+		{file: "anthropic-stream-zero.sse", family: Anthropic, want: Usage{Family: Anthropic}},
+		{file: "anthropic-stream-truncated.sse", family: Anthropic, wantErr: ErrTruncated,
+			want: Usage{Family: Anthropic, InputTokens: 25, OutputTokens: 1}},
+		{file: "anthropic-stream-no-stop.sse", family: Anthropic, wantErr: ErrTruncated,
+			want: Usage{Family: Anthropic, InputTokens: 25, OutputTokens: 15}},
+		{file: "anthropic-stream-error.sse", family: Anthropic, wantErr: ErrTruncated,
+			want: Usage{Family: Anthropic, InputTokens: 25, OutputTokens: 1}},
+		// An error event ends the reply even when a message_stop follows it: the error wins.
+		{file: "anthropic-stream-error-then-stop.sse", family: Anthropic, wantErr: ErrTruncated,
+			want: Usage{Family: Anthropic, InputTokens: 25, OutputTokens: 1}},
+		{file: "chat-stream.sse", family: OpenAIChat, want: Usage{Family: OpenAIChat, InputTokens: 1200,
+			OutputTokens: 42, CachedPromptTokens: 1024, ReportedTotalTokens: 1242}},
+		// Cumulative usage on every chunk, growing, as some compatible servers send it: the last block.
+		{file: "chat-stream-twice.sse", family: OpenAIChat, want: Usage{Family: OpenAIChat, InputTokens: 300,
+			OutputTokens: 7, ReportedTotalTokens: 307}},
+		{file: "chat-stream-zero.sse", family: OpenAIChat, want: Usage{Family: OpenAIChat}},
+		{file: "chat-stream-no-usage.sse", family: OpenAIChat, wantErr: ErrNoUsage},
+		{file: "chat-stream-truncated.sse", family: OpenAIChat, wantErr: ErrTruncated},
+		{file: "chat-stream-no-done.sse", family: OpenAIChat, wantErr: ErrTruncated, want: Usage{Family: OpenAIChat,
+			InputTokens: 1200, OutputTokens: 42, CachedPromptTokens: 1024, ReportedTotalTokens: 1242}},
+		{file: "chat-stream-error.sse", family: OpenAIChat, wantErr: ErrTruncated},
+		{file: "responses-stream.sse", family: OpenAIResponses, want: Usage{Family: OpenAIResponses, InputTokens: 75,
+			OutputTokens: 1186, ReasoningTokens: 1024, ReportedTotalTokens: 1261}},
+		{file: "responses-stream-cache.sse", family: OpenAIResponses, want: Usage{Family: OpenAIResponses,
+			InputTokens: 12000, OutputTokens: 20, CachedPromptTokens: 4000, CacheWritePromptTokens: 7000,
+			CacheWrite30mPromptTokens: 3000, CacheWrite12hPromptTokens: 4000, ReportedTotalTokens: 12020}},
+		{file: "responses-stream-incomplete.sse", family: OpenAIResponses, want: Usage{Family: OpenAIResponses,
+			InputTokens: 75, OutputTokens: 512, ReasoningTokens: 512, ReportedTotalTokens: 587}},
+		{file: "responses-stream-zero.sse", family: OpenAIResponses, want: Usage{Family: OpenAIResponses}},
+		// Two final events: the first gives the final usage and the second is a trailing error.
+		{file: "responses-stream-twice.sse", family: OpenAIResponses, wantErr: ErrMalformed,
+			want: Usage{Family: OpenAIResponses, InputTokens: 75, OutputTokens: 1186, ReasoningTokens: 1024,
+				ReportedTotalTokens: 1261}},
+		{file: "responses-stream-truncated.sse", family: OpenAIResponses, wantErr: ErrTruncated},
+		{file: "responses-stream-no-usage.sse", family: OpenAIResponses, wantErr: ErrNoUsage},
+	}
+	for _, tt := range tests {
+		t.Run(tt.file, func(t *testing.T) {
+			got, err := ParseStream(tt.family, openFixture(t, tt.file), testLimits)
+			if !errors.Is(err, tt.wantErr) || (tt.wantErr == nil && err != nil) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("usage = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseJSONInline(t *testing.T) {
+	const anthropicOK = `{"usage":{"input_tokens":3,"output_tokens":4}}`
+	tests := []struct {
+		name    string
+		family  Family
+		body    string
+		lim     Limits
+		want    Usage
+		wantErr error
+	}{
+		{name: "ok", family: Anthropic, body: anthropicOK, want: Usage{Family: Anthropic, InputTokens: 3,
+			OutputTokens: 4}},
+		{name: "unknown fields ignored", family: Anthropic,
+			body: `{"x":[1,{"y":null}],"usage":{"input_tokens":3,"output_tokens":4,"z":"w"}}`,
+			want: Usage{Family: Anthropic, InputTokens: 3, OutputTokens: 4}},
+		// A byte order mark before the reply is skipped, as ParseStream skips one before the stream.
+		{name: "byte order mark", family: Anthropic, body: "\xEF\xBB\xBF" + anthropicOK, want: Usage{Family: Anthropic,
+			InputTokens: 3, OutputTokens: 4}},
+		{name: "byte order mark only once", family: Anthropic, body: "\xEF\xBB\xBF\xEF\xBB\xBF" + anthropicOK,
+			wantErr: ErrMalformed},
+		{name: "malformed json", family: Anthropic, body: `{"usage":{"input_tokens":3,`, wantErr: ErrMalformed},
+		{name: "empty", family: OpenAIChat, body: ``, wantErr: ErrMalformed},
+		{name: "array", family: OpenAIChat, body: `[{"usage":{}}]`, wantErr: ErrMalformed},
+		{name: "trailing data", family: Anthropic, body: anthropicOK + `{}`, wantErr: ErrMalformed},
+		{name: "usage not an object", family: Anthropic, body: `{"usage":5}`, wantErr: ErrMalformed},
+		{name: "usage null", family: OpenAIResponses, body: `{"usage":null}`, wantErr: ErrNoUsage},
+		// A breakdown is part of its parent count: equal or lower is accepted, higher is out of range.
+		{name: "anthropic cache write lifetimes", family: Anthropic,
+			body: `{"usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":10,` +
+				`"cache_creation":{"ephemeral_5m_input_tokens":6,"ephemeral_1h_input_tokens":4}}}`,
+			want: Usage{Family: Anthropic, InputTokens: 1, OutputTokens: 2, CacheCreationInputTokens: 10,
+				CacheCreation5mInputTokens: 6, CacheCreation1hInputTokens: 4}},
+		// Neither reference bounds the lifetimes by the cache writes, so they are reported as given, and the
+		// writes are not made up from them when absent.
+		{name: "anthropic cache write lifetimes above the writes", family: Anthropic,
+			body: `{"usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":10,` +
+				`"cache_creation":{"ephemeral_5m_input_tokens":6,"ephemeral_1h_input_tokens":5}}}`,
+			want: Usage{Family: Anthropic, InputTokens: 1, OutputTokens: 2, CacheCreationInputTokens: 10,
+				CacheCreation5mInputTokens: 6, CacheCreation1hInputTokens: 5}},
+		{name: "anthropic cache write lifetimes without the writes", family: Anthropic,
+			body: `{"usage":{"input_tokens":1,"output_tokens":2,"cache_creation":{"ephemeral_1h_input_tokens":5}}}`,
+			want: Usage{Family: Anthropic, InputTokens: 1, OutputTokens: 2, CacheCreation1hInputTokens: 5}},
+		{name: "anthropic cache_creation not an object", family: Anthropic,
+			body: `{"usage":{"input_tokens":1,"output_tokens":2,"cache_creation":3}}`, wantErr: ErrMalformed},
+		{name: "anthropic thinking above output", family: Anthropic,
+			body:    `{"usage":{"input_tokens":1,"output_tokens":2,"output_tokens_details":{"thinking_tokens":3}}}`,
+			wantErr: ErrOutOfRange},
+		{name: "anthropic thinking not an integer", family: Anthropic,
+			body:    `{"usage":{"input_tokens":1,"output_tokens":2,"output_tokens_details":{"thinking_tokens":1.5}}}`,
+			wantErr: ErrMalformed},
+		// Server tool use is a count of requests, not tokens, and is not read.
+		{name: "anthropic server tool requests", family: Anthropic,
+			body: `{"usage":{"input_tokens":1,"output_tokens":2,"server_tool_use":{"web_search_requests":9}}}`,
+			want: Usage{Family: Anthropic, InputTokens: 1, OutputTokens: 2}},
+		{name: "responses cache write lifetimes below the writes", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":20,"output_tokens":2,"input_tokens_details":{"cache_write_tokens":10,` +
+				`"cache_write_tokens_details":{"ttl_30m_tokens":3}}}}`,
+			want: Usage{Family: OpenAIResponses, InputTokens: 20, OutputTokens: 2, CacheWritePromptTokens: 10,
+				CacheWrite30mPromptTokens: 3}},
+		{name: "responses cache write lifetimes above the writes", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":20,"output_tokens":2,"input_tokens_details":{"cache_write_tokens":10,` +
+				`"cache_write_tokens_details":{"ttl_30m_tokens":3,"ttl_12h_tokens":8}}}}`,
+			want: Usage{Family: OpenAIResponses, InputTokens: 20, OutputTokens: 2, CacheWritePromptTokens: 10,
+				CacheWrite30mPromptTokens: 3, CacheWrite12hPromptTokens: 8}},
+		{name: "responses cache write lifetimes without the writes", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":20,"output_tokens":2,` +
+				`"input_tokens_details":{"cache_write_tokens_details":{"ttl_30m_tokens":4}}}}`,
+			want: Usage{Family: OpenAIResponses, InputTokens: 20, OutputTokens: 2, CacheWrite30mPromptTokens: 4}},
+		// The chat reference has no cache_write_tokens_details, so it is not read there.
+		{name: "chat cache write lifetimes not read", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":20,"completion_tokens":2,"prompt_tokens_details":{"cache_write_tokens":10,` +
+				`"cache_write_tokens_details":{"ttl_30m_tokens":3,"ttl_12h_tokens":7}}}}`,
+			want: Usage{Family: OpenAIChat, InputTokens: 20, OutputTokens: 2, CacheWritePromptTokens: 10}},
+		// Keys match exactly, never ignoring case.
+		{name: "upper-case keys", family: Anthropic, body: `{"USAGE":{"Input_Tokens":5,"output_tokens":1}}`,
+			wantErr: ErrNoUsage},
+		{name: "upper-case count", family: Anthropic, body: `{"usage":{"Input_Tokens":5,"output_tokens":1}}`,
+			wantErr: ErrNoUsage},
+		{name: "upper-case details", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":5,"output_tokens":1,"Input_Tokens_Details":{"cached_tokens":2}}}`,
+			want: Usage{Family: OpenAIResponses, InputTokens: 5, OutputTokens: 1}},
+		// A key twice in one object is malformed, wherever the parser reads it.
+		{name: "two usage blocks", family: Anthropic,
+			body: `{"usage":{"input_tokens":3},"usage":{"output_tokens":4}}`, wantErr: ErrMalformed},
+		{name: "a count twice", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"input_tokens":5}}`, wantErr: ErrMalformed},
+		{name: "a detail twice", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":9,"completion_tokens":4,` +
+				`"prompt_tokens_details":{"cached_tokens":1,"cached_tokens":2}}}`, wantErr: ErrMalformed},
+		{name: "a key twice outside usage", family: Anthropic,
+			body: `{"id":"a","id":"b","usage":{"input_tokens":3,"output_tokens":4}}`, wantErr: ErrMalformed},
+		{name: "output missing", family: Anthropic, body: `{"usage":{"input_tokens":3}}`, wantErr: ErrNoUsage},
+		{name: "fraction", family: Anthropic, body: `{"usage":{"input_tokens":3.5,"output_tokens":4}}`,
+			wantErr: ErrMalformed},
+		{name: "exponent", family: Anthropic, body: `{"usage":{"input_tokens":3e2,"output_tokens":4}}`,
+			wantErr: ErrMalformed},
+		// The class follows the form, not the size: a long exponent form is malformed, not out of range.
+		{name: "exponent with a long mantissa", family: Anthropic,
+			body: `{"usage":{"input_tokens":100000000000000000000e-20,"output_tokens":4}}`, wantErr: ErrMalformed},
+		{name: "string count", family: OpenAIChat, body: `{"usage":{"prompt_tokens":"3","completion_tokens":4}}`,
+			wantErr: ErrMalformed},
+		{name: "beyond int64", family: OpenAIChat,
+			body:    `{"usage":{"prompt_tokens":99999999999999999999,"completion_tokens":4}}`,
+			wantErr: ErrOutOfRange},
+		{name: "negative", family: OpenAIResponses, body: `{"usage":{"input_tokens":3,"output_tokens":-4}}`,
+			wantErr: ErrOutOfRange},
+		{name: "above max", family: Anthropic, body: `{"usage":{"input_tokens":101,"output_tokens":0}}`,
+			lim: Limits{MaxBytes: 1024, MaxTokens: 100}, wantErr: ErrOutOfRange},
+		{name: "at max", family: Anthropic, body: `{"usage":{"input_tokens":100,"output_tokens":0}}`,
+			lim: Limits{MaxBytes: 1024, MaxTokens: 100}, want: Usage{Family: Anthropic, InputTokens: 100}},
+		{name: "anthropic whole prompt above max", family: Anthropic,
+			body: `{"usage":{"input_tokens":40,"cache_read_input_tokens":40,` +
+				`"cache_creation_input_tokens":40,"output_tokens":0}}`,
+			lim: Limits{MaxBytes: 1024, MaxTokens: 100}, wantErr: ErrOutOfRange},
+		{name: "total above max", family: OpenAIChat, body: `{"usage":{"prompt_tokens":60,"completion_tokens":60}}`,
+			lim: Limits{MaxBytes: 1024, MaxTokens: 100}, wantErr: ErrOutOfRange},
+		{name: "reasoning above output", family: OpenAIResponses,
+			body:    `{"usage":{"input_tokens":3,"output_tokens":4,"output_tokens_details":{"reasoning_tokens":5}}}`,
+			wantErr: ErrOutOfRange},
+		{name: "cache reads and writes above prompt", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":10,"output_tokens":4,` +
+				`"input_tokens_details":{"cached_tokens":6,"cache_write_tokens":5}}}`,
+			wantErr: ErrOutOfRange},
+		{name: "exactly the byte limit", family: Anthropic, body: anthropicOK,
+			lim:  Limits{MaxBytes: int64(len(anthropicOK)), MaxTokens: 10},
+			want: Usage{Family: Anthropic, InputTokens: 3, OutputTokens: 4}},
+		{name: "one byte over the limit", family: Anthropic, body: anthropicOK + " ",
+			lim: Limits{MaxBytes: int64(len(anthropicOK)), MaxTokens: 10}, wantErr: ErrTooLarge},
+		{name: "unknown family", family: Family(9), body: anthropicOK, wantErr: ErrInvalidLimits},
+		{name: "zero limits", family: Anthropic, body: anthropicOK, lim: Limits{MaxTokens: -1},
+			wantErr: ErrInvalidLimits},
+		{name: "max tokens above ceiling", family: Anthropic, body: anthropicOK, lim: Limits{MaxBytes: 10,
+			MaxTokens: MaxTokensCeiling + 1},
+			wantErr: ErrInvalidLimits},
+		// Responses status validation (Issue 25).
+		{name: "responses status null behaves as absent", family: OpenAIResponses,
+			body: `{"status":null,"usage":{"input_tokens":3,"output_tokens":4}}`,
+			want: Usage{Family: OpenAIResponses, InputTokens: 3, OutputTokens: 4}},
+		{name: "responses status in_progress without usage", family: OpenAIResponses,
+			body: `{"status":"in_progress","usage":null}`, wantErr: ErrTruncated},
+		{name: "responses status in_progress with duplicate key", family: OpenAIResponses,
+			body:    `{"status":"in_progress","id":"a","id":"b","usage":{"input_tokens":3,"output_tokens":4}}`,
+			wantErr: ErrMalformed},
+		{name: "anthropic ignores status member", family: Anthropic,
+			body: `{"status":"in_progress","usage":{"input_tokens":3,"output_tokens":4}}`,
+			want: Usage{Family: Anthropic, InputTokens: 3, OutputTokens: 4}},
+		{name: "chat ignores status member", family: OpenAIChat,
+			body: `{"status":"in_progress","usage":{"prompt_tokens":3,"completion_tokens":4}}`,
+			want: Usage{Family: OpenAIChat, InputTokens: 3, OutputTokens: 4}},
+		// OpenAI total_tokens validation (Issue 24).
+		{name: "chat total equals sum", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`,
+			want: Usage{Family: OpenAIChat, InputTokens: 3, OutputTokens: 4, ReportedTotalTokens: 7}},
+		{name: "chat total above sum kept in ReportedTotalTokens", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":20}}`,
+			want: Usage{Family: OpenAIChat, InputTokens: 9, OutputTokens: 2, ReportedTotalTokens: 20}},
+		{name: "responses total above sum kept in ReportedTotalTokens", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":9,"output_tokens":2,"total_tokens":20}}`,
+			want: Usage{Family: OpenAIResponses, InputTokens: 9, OutputTokens: 2, ReportedTotalTokens: 20}},
+		{name: "chat total zero next to non-zero parts treated as absent", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":0}}`,
+			want: Usage{Family: OpenAIChat, InputTokens: 9, OutputTokens: 2}},
+		{name: "responses total zero next to non-zero parts treated as absent", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":9,"output_tokens":2,"total_tokens":0}}`,
+			want: Usage{Family: OpenAIResponses, InputTokens: 9, OutputTokens: 2}},
+		{name: "chat positive total below sum", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":1}}`, wantErr: ErrOutOfRange},
+		{name: "chat total null ignored", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":null}}`,
+			want: Usage{Family: OpenAIChat, InputTokens: 3, OutputTokens: 4}},
+		{name: "chat total above max", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":101}}`,
+			lim:  Limits{MaxBytes: 1024, MaxTokens: 100}, wantErr: ErrOutOfRange},
+		{name: "responses total above max", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":101}}`,
+			lim:  Limits{MaxBytes: 1024, MaxTokens: 100}, wantErr: ErrOutOfRange},
+		{name: "responses total string", family: OpenAIResponses,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":"7"}}`, wantErr: ErrMalformed},
+		{name: "anthropic ignores total_tokens", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":1}}`,
+			want: Usage{Family: Anthropic, InputTokens: 3, OutputTokens: 4}},
+		// Anthropic compaction and advisor usage.iterations (Issue 26).
+		{name: "anthropic multiple compaction and advisor iterations summed", family: Anthropic,
+			body: `{"usage":{"input_tokens":10,"output_tokens":5,"iterations":[` +
+				`{"type":"compaction","input_tokens":100,"output_tokens":20,"cache_creation_input_tokens":10,` +
+				`"cache_read_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":6,"ephemeral_1h_input_tokens":4}},` +
+				`{"type":"message","input_tokens":10,"output_tokens":5},` +
+				`{"input_tokens":50,"output_tokens":15,"type":"compaction","cache_read_input_tokens":20},` +
+				`{"type":"advisor_message","input_tokens":200,"output_tokens":300,"cache_creation_input_tokens":12,` +
+				`"cache_read_input_tokens":25,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":5}},` +
+				`{"type":"advisor_message","input_tokens":50,"output_tokens":70,"cache_read_input_tokens":15},` +
+				`{"type":"fallback_message","input_tokens":999,"output_tokens":999},` +
+				`{"input_tokens":888}]}}`,
+			want: Usage{Family: Anthropic, InputTokens: 10, OutputTokens: 5,
+				CompactionInputTokens: 150, CompactionOutputTokens: 35,
+				CompactionCacheCreationInputTokens: 10, CompactionCacheCreation5mInputTokens: 6,
+				CompactionCacheCreation1hInputTokens: 4, CompactionCacheReadInputTokens: 50,
+				AdvisorInputTokens: 250, AdvisorOutputTokens: 370,
+				AdvisorCacheCreationInputTokens: 12, AdvisorCacheCreation5mInputTokens: 7,
+				AdvisorCacheCreation1hInputTokens: 5, AdvisorCacheReadInputTokens: 40,
+				UnclassifiedIterationInputTokens: 1887, UnclassifiedIterationOutputTokens: 999}},
+		{name: "anthropic iterations null and empty", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":null}}`,
+			want: Usage{Family: Anthropic, InputTokens: 3, OutputTokens: 4}},
+		{name: "anthropic iterations empty array", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[]}}`,
+			want: Usage{Family: Anthropic, InputTokens: 3, OutputTokens: 4}},
+		{name: "anthropic iterations not an array", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":{}}}`, wantErr: ErrMalformed},
+		{name: "anthropic iterations element not an object", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[1]}}`, wantErr: ErrMalformed},
+		{name: "anthropic iterations element non-string type", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[{"type":1}]}}`, wantErr: ErrMalformed},
+		{name: "anthropic iterations element duplicate key", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[` +
+				`{"type":"compaction","input_tokens":1,"input_tokens":2}]}}`,
+			wantErr: ErrMalformed},
+		{name: "anthropic compaction negative count", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[` +
+				`{"type":"compaction","input_tokens":-1,"output_tokens":1}]}}`,
+			wantErr: ErrOutOfRange},
+		{name: "anthropic compaction non-integer count", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[` +
+				`{"type":"compaction","input_tokens":1.5,"output_tokens":1}]}}`,
+			wantErr: ErrMalformed},
+		{name: "anthropic compaction cache_creation not an object", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[` +
+				`{"type":"compaction","input_tokens":1,"cache_creation":2}]}}`,
+			wantErr: ErrMalformed},
+		{name: "anthropic compaction sum above max", family: Anthropic,
+			body: `{"usage":{"input_tokens":50,"output_tokens":10,"iterations":[` +
+				`{"type":"compaction","input_tokens":40,"output_tokens":5}]}}`,
+			lim: Limits{MaxBytes: 1024, MaxTokens: 100}, wantErr: ErrOutOfRange},
+		{name: "anthropic compaction sum overflow ceiling", family: Anthropic,
+			body: `{"usage":{"input_tokens":1,"output_tokens":1,"iterations":[` +
+				`{"type":"compaction","input_tokens":1152921504606846976,"output_tokens":1},` +
+				`{"type":"compaction","input_tokens":1,"output_tokens":1}]}}`,
+			lim: Limits{MaxBytes: 1024, MaxTokens: MaxTokensCeiling}, wantErr: ErrOutOfRange},
+		{name: "anthropic iterations over 1024 entries within byte limit", family: Anthropic,
+			body: `{"usage":{"input_tokens":1,"output_tokens":2,"iterations":[` +
+				strings.Repeat(`{},`, 2000) +
+				`{"type":"compaction","input_tokens":3,"output_tokens":4}]}}`,
+			want: Usage{Family: Anthropic, InputTokens: 1, OutputTokens: 2,
+				CompactionInputTokens: 3, CompactionOutputTokens: 4}},
+		{name: "anthropic message iteration negative count", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[` +
+				`{"type":"message","input_tokens":-1,"output_tokens":1}]}}`,
+			wantErr: ErrOutOfRange},
+		{name: "anthropic message iteration oversized count", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[` +
+				`{"type":"message","input_tokens":101,"output_tokens":1}]}}`,
+			lim: Limits{MaxBytes: 1024, MaxTokens: 100}, wantErr: ErrOutOfRange},
+		{name: "anthropic message iteration non-integer count", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[` +
+				`{"type":"message","input_tokens":1.5,"output_tokens":1}]}}`,
+			wantErr: ErrMalformed},
+		{name: "anthropic advisor iteration negative count", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[` +
+				`{"type":"advisor_message","output_tokens":-1}]}}`,
+			wantErr: ErrOutOfRange},
+		{name: "anthropic advisor iteration oversized count", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[` +
+				`{"type":"advisor_message","input_tokens":101}]}}`,
+			lim: Limits{MaxBytes: 1024, MaxTokens: 100}, wantErr: ErrOutOfRange},
+		{name: "anthropic fallback_message iteration negative count", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[` +
+				`{"type":"fallback_message","input_tokens":-1}]}}`,
+			wantErr: ErrOutOfRange},
+		{name: "anthropic fallback_message iteration oversized count", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[` +
+				`{"type":"fallback_message","output_tokens":101}]}}`,
+			lim: Limits{MaxBytes: 1024, MaxTokens: 100}, wantErr: ErrOutOfRange},
+		{name: "anthropic unclassified unknown type summed", family: Anthropic,
+			body: `{"usage":{"input_tokens":1,"output_tokens":1,"iterations":[` +
+				`{"type":"advisor_message_v2","input_tokens":5000,"output_tokens":5000}]}}`,
+			want: Usage{Family: Anthropic, InputTokens: 1, OutputTokens: 1,
+				UnclassifiedIterationInputTokens: 5000, UnclassifiedIterationOutputTokens: 5000}},
+		{name: "anthropic unclassified fallback null missing and cache counts summed", family: Anthropic,
+			body: `{"usage":{"input_tokens":10,"output_tokens":5,"iterations":[` +
+				`{"type":"fallback_message","input_tokens":100,"cache_creation_input_tokens":20,` +
+				`"cache_read_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":12,` +
+				`"ephemeral_1h_input_tokens":8},"output_tokens":40},` +
+				`{"type":null,"input_tokens":7,"cache_read_input_tokens":3,"output_tokens":2},` +
+				`{"input_tokens":5,"cache_creation_input_tokens":4,"output_tokens":1},` +
+				`{"type":"future_type","input_tokens":9,"output_tokens":6}]}}`,
+			want: Usage{Family: Anthropic, InputTokens: 10, OutputTokens: 5,
+				UnclassifiedIterationInputTokens: 178, UnclassifiedIterationOutputTokens: 49}},
+		{name: "anthropic unclassified iteration cache lifetime oversized", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[` +
+				`{"type":"future_type","cache_creation":{"ephemeral_5m_input_tokens":101}}]}}`,
+			lim: Limits{MaxBytes: 1024, MaxTokens: 100}, wantErr: ErrOutOfRange},
+		{name: "anthropic unclassified iteration sum above max", family: Anthropic,
+			body: `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[` +
+				`{"type":"fallback_message","input_tokens":60},{"type":"future_type","input_tokens":50}]}}`,
+			lim: Limits{MaxBytes: 1024, MaxTokens: 100}, wantErr: ErrOutOfRange},
+		{name: "anthropic unclassified iteration sum overflow ceiling", family: Anthropic,
+			body: `{"usage":{"input_tokens":1,"output_tokens":1,"iterations":[` +
+				`{"type":"future_type","input_tokens":1152921504606846976},` +
+				`{"type":"future_type","input_tokens":1}]}}`,
+			lim: Limits{MaxBytes: 1024, MaxTokens: MaxTokensCeiling}, wantErr: ErrOutOfRange},
+		{name: "anthropic iteration without type negative count", family: Anthropic,
+			body:    `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[{"input_tokens":-1}]}}`,
+			wantErr: ErrOutOfRange},
+		{name: "anthropic iteration without type non-integer count", family: Anthropic,
+			body:    `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[{"output_tokens":"x"}]}}`,
+			wantErr: ErrMalformed},
+		{name: "anthropic iteration unknown type negative count", family: Anthropic,
+			body:    `{"usage":{"input_tokens":3,"output_tokens":4,"iterations":[{"type":"future_type","input_tokens":-1}]}}`,
+			wantErr: ErrOutOfRange},
+		{name: "openai ignores iterations member", family: OpenAIChat,
+			body: `{"usage":{"prompt_tokens":3,"completion_tokens":4,"iterations":[` +
+				`{"type":"compaction","input_tokens":8,"output_tokens":1}]}}`,
+			want: Usage{Family: OpenAIChat, InputTokens: 3, OutputTokens: 4}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lim := tt.lim
+			if lim == (Limits{}) {
+				lim = testLimits
+			}
+			got, err := ParseJSON(tt.family, strings.NewReader(tt.body), lim)
+			if !errors.Is(err, tt.wantErr) || (tt.wantErr == nil && err != nil) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("usage = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// streamCase is one inline stream with the result ParseStream must give.
+type streamCase struct {
+	name     string
+	family   Family
+	body     string
+	lim      Limits
+	want     Usage
+	wantErr  error
+	trailing bool // the error is a *TrailingError; otherwise, with a usage, a *PartialError
+}
+
+// streamInlineCases are the inline streams, shared with the chunking property.
+func streamInlineCases() []streamCase {
+	const (
+		start = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n"
+		delta = "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n"
+		stop  = "data: {\"type\":\"message_stop\"}\n\n"
+	)
+	ok := Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}
+	long := "data: {\"type\":\"ping\",\"pad\":\"" + strings.Repeat("x", 100) + "\"}"
+	start1 := Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 1}
+	chat1 := Usage{Family: OpenAIChat, InputTokens: 1, OutputTokens: 1}
+	return []streamCase{
+		{name: "ok", family: Anthropic, body: start + delta + stop, want: ok},
+		{name: "crlf and comments", family: Anthropic, body: strings.ReplaceAll(": keep-alive\n\n"+start+delta+stop,
+			"\n", "\r\n"), want: ok},
+		{name: "byte order mark", family: Anthropic, body: "\xEF\xBB\xBF" + start + delta + stop, want: ok},
+		{name: "bare cr", family: Anthropic, body: strings.ReplaceAll(": keep-alive\n\n"+start+delta+stop, "\n", "\r"),
+			want: ok},
+		{name: "byte order mark and bare cr", family: Anthropic,
+			body: "\xEF\xBB\xBF" + strings.ReplaceAll(start+delta+stop, "\n", "\r"), want: ok},
+		{name: "event data at the line limit", family: Anthropic,
+			body: start + "data: " + strings.Repeat("x", 50) + "\ndata: " + strings.Repeat("y", 49) + "\n\n" +
+				delta + stop,
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: 100, MaxTokens: 100}, wantErr: ErrMalformed, want: start1},
+		{name: "event data over the line limit", family: Anthropic,
+			body: start + "data: " + strings.Repeat("x", 50) + "\ndata: " + strings.Repeat("y", 50) + "\n\n" +
+				delta + stop,
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: 100, MaxTokens: 100}, wantErr: ErrLineTooLong, want: start1},
+		{name: "no space after colon", family: Anthropic, body: strings.ReplaceAll(start+delta+stop, "data: ",
+			"data:"), want: ok},
+		{name: "data split over lines", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\n" +
+				"data: \"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n" + delta + stop,
+			want: ok},
+		// An event counts only once its blank line is read: without it, message_stop is not the final event.
+		{name: "last event without blank line", family: Anthropic, body: start + delta +
+			"data: {\"type\":\"message_stop\"}", wantErr: ErrTruncated, want: ok},
+		{name: "last event ending in one line end", family: Anthropic, body: start + delta +
+			"data: {\"type\":\"message_stop\"}\n", wantErr: ErrTruncated, want: ok},
+		{name: "event cut at the end", family: Anthropic, body: start + delta + "data: {\"type\":\"message_st",
+			wantErr: ErrTruncated, want: ok},
+		{name: "empty stream", family: Anthropic, body: "", wantErr: ErrTruncated},
+		{name: "malformed event", family: Anthropic, body: start + "data: {nope}\n\n" + stop, wantErr: ErrMalformed,
+			want: start1},
+		// After the final event, an event that would change the counts or end the reply again is malformed;
+		// any other is ignored.
+		{name: "delta after the final event", family: Anthropic, body: start + delta + stop + delta,
+			wantErr: ErrMalformed, want: ok, trailing: true},
+		{name: "start after the final event", family: Anthropic, body: start + delta + stop + start,
+			wantErr: ErrMalformed, want: ok, trailing: true},
+		{name: "second message_stop", family: Anthropic, body: start + delta + stop + stop, wantErr: ErrMalformed,
+			want: ok, trailing: true},
+		{name: "ping after the final event", family: Anthropic,
+			body: start + delta + stop + "data: {\"type\":\"ping\"}\n\n", want: ok},
+		{name: "unknown event after the final event", family: Anthropic,
+			body: start + delta + stop + "event: x\ndata: {\"type\":\"x\"}\n\n", want: ok},
+		{name: "unfinished event after the final event", family: Anthropic,
+			body: start + delta + stop + "event: x\ndata: {\"type\":\"x\"}", wantErr: ErrTruncated, want: ok, trailing: true},
+		{name: "known event after the final event", family: Anthropic,
+			body:    start + delta + stop + "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+			wantErr: ErrMalformed, want: ok, trailing: true},
+		{name: "malformed event after the final event", family: Anthropic, body: start + delta + stop + "data: {\n\n",
+			wantErr: ErrMalformed, want: ok, trailing: true},
+		{name: "responses done after the final event", family: OpenAIResponses,
+			body: "data: {\"type\":\"response.completed\",\"response\":" +
+				"{\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\n" +
+				"data: [DONE]\n\n",
+			want: Usage{Family: OpenAIResponses, InputTokens: 2, OutputTokens: 3}},
+		{name: "responses event after the final event", family: OpenAIResponses,
+			body: "data: {\"type\":\"response.completed\",\"response\":" +
+				"{\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\n" +
+				"data: {\"type\":\"response.output_text.done\"}\n\n",
+			want: Usage{Family: OpenAIResponses, InputTokens: 2, OutputTokens: 3}},
+		{name: "chat second done", family: OpenAIChat,
+			body:    "data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\ndata: [DONE]\n\ndata: [DONE]\n\n",
+			wantErr: ErrMalformed, want: chat1, trailing: true},
+		{name: "breakdowns across events", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
+				"\"cache_creation_input_tokens\":30,\"cache_creation\":{\"ephemeral_5m_input_tokens\":10," +
+				"\"ephemeral_1h_input_tokens\":20}}}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9," +
+				"\"output_tokens_details\":{\"thinking_tokens\":4}}}\n\n" + stop,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9, CacheCreationInputTokens: 30,
+				CacheCreation5mInputTokens: 10, CacheCreation1hInputTokens: 20, ReasoningTokens: 4}},
+		// The lifetimes come in message_start and the cache writes, cumulative, in a later message_delta.
+		{name: "cache write lifetimes before their writes", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
+				"\"cache_creation\":{\"ephemeral_1h_input_tokens\":20}}}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9,\"cache_creation_input_tokens\":20}}\n\n" +
+				stop,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9, CacheCreationInputTokens: 20,
+				CacheCreation1hInputTokens: 20}},
+		{name: "cache write lifetimes without writes", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
+				"\"cache_creation\":{\"ephemeral_5m_input_tokens\":4}}}}\n\n" + delta + stop,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9, CacheCreation5mInputTokens: 4}},
+		// The thinking tokens are checked against the output once, at the final event, not between updates.
+		{name: "thinking before its output", family: Anthropic,
+			body: start + "data: {\"type\":\"message_delta\"," +
+				"\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":8}}}\n\n" + delta + stop,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9, ReasoningTokens: 8}},
+		{name: "thinking above output across events", family: Anthropic,
+			body: start + "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9," +
+				"\"output_tokens_details\":{\"thinking_tokens\":10}}}\n\n" + stop,
+			wantErr: ErrOutOfRange, want: Usage{Family: Anthropic, InputTokens: 5,
+				OutputTokens: 9, ReasoningTokens: 10}},
+		{name: "event type in upper case", family: Anthropic, body: start + delta + "data: {\"TYPE\":\"message_stop\"}\n\n",
+			wantErr: ErrTruncated, want: ok},
+		{name: "event type twice", family: Anthropic,
+			body: start + delta + "data: {\"type\":\"ping\",\"type\":\"message_stop\"}\n\n", wantErr: ErrMalformed, want: ok},
+		{name: "second message_start", family: Anthropic, body: start + start + delta + stop, wantErr: ErrMalformed,
+			want: start1},
+		{name: "delta before start", family: Anthropic, body: delta + start + stop, wantErr: ErrMalformed},
+		{name: "no input count", family: Anthropic, body: "data: {\"type\":\"message_start\",\"message\":{}}\n\n" +
+			delta + stop, wantErr: ErrNoUsage, want: Usage{Family: Anthropic, OutputTokens: 9}},
+		{name: "negative delta", family: Anthropic, body: start +
+			"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":-9}}\n\n" + stop,
+			wantErr: ErrOutOfRange, want: start1},
+		{name: "null delta count keeps the earlier one", family: Anthropic,
+			body: start + delta + "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":null}}\n\n" + stop,
+			want: ok},
+		{name: "line at the limit", family: Anthropic, body: start + long + "\n\n" + delta + stop,
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: len(long), MaxTokens: 100}, want: ok},
+		{name: "line at the limit with crlf", family: Anthropic, body: start + long + "\r\n\r\n" + delta + stop,
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: len(long), MaxTokens: 100}, want: ok},
+		{name: "oversized line", family: Anthropic, body: start + long + "x\n\n" + delta + stop,
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: len(long), MaxTokens: 100}, wantErr: ErrLineTooLong, want: start1},
+		{name: "oversized line without newline", family: Anthropic, body: start + long + strings.Repeat("x", 1000),
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: len(long), MaxTokens: 100}, wantErr: ErrLineTooLong, want: start1},
+		// Every event ends within the limit, so the final usage stands; the byte past it is a trailing problem.
+		{name: "stream over the byte limit", family: Anthropic, body: start + delta + stop + "\n",
+			lim:     Limits{MaxBytes: int64(len(start + delta + stop)), MaxLineBytes: 1024, MaxTokens: 100},
+			wantErr: ErrTooLarge, want: ok, trailing: true},
+		{name: "final event cut by the byte limit", family: Anthropic, body: start + delta + stop,
+			lim:     Limits{MaxBytes: int64(len(start+delta+stop)) - 1, MaxLineBytes: 1024, MaxTokens: 100},
+			wantErr: ErrTooLarge, want: ok},
+		{name: "stream at the byte limit", family: Anthropic, body: start + delta + stop,
+			lim: Limits{MaxBytes: int64(len(start + delta + stop)), MaxLineBytes: 1024, MaxTokens: 100}, want: ok},
+		{name: "count above max", family: Anthropic, body: start + delta + stop,
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: 1024, MaxTokens: 8}, wantErr: ErrOutOfRange, want: start1},
+		{name: "chat data after done", family: OpenAIChat,
+			body:    "data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\ndata: [DONE]\n\ndata: {}\n\n",
+			wantErr: ErrMalformed, want: chat1, trailing: true},
+		{name: "chat non-json data", family: OpenAIChat, body: "data: hello\n\ndata: [DONE]\n\n",
+			wantErr: ErrMalformed},
+		{name: "chat usage without counts", family: OpenAIChat, body: "data: {\"usage\":{}}\n\ndata: [DONE]\n\n",
+			wantErr: ErrNoUsage},
+		{name: "chat usage above prompt", family: OpenAIChat,
+			body: "data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1," +
+				"\"prompt_tokens_details\":{\"cached_tokens\":2}}}\n\ndata: [DONE]\n\n",
+			wantErr: ErrOutOfRange},
+		{name: "responses usage in created is ignored", family: OpenAIResponses,
+			body: "data: {\"type\":\"response.created\"," +
+				"\"response\":{\"usage\":{\"input_tokens\":99,\"output_tokens\":99}}}\n\n" +
+				"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\n",
+			want: Usage{Family: OpenAIResponses, InputTokens: 2, OutputTokens: 3}},
+		{name: "responses failed with usage", family: OpenAIResponses,
+			body: "data: {\"type\":\"response.failed\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+			want: Usage{Family: OpenAIResponses, InputTokens: 2}},
+		{name: "responses final without response", family: OpenAIResponses,
+			body: "data: {\"type\":\"response.completed\"}\n\n", wantErr: ErrMalformed},
+		{name: "responses error event", family: OpenAIResponses,
+			body: "data: {\"type\":\"error\",\"code\":\"server_error\"}\n\n", wantErr: ErrTruncated},
+		{name: "responses completed with in_progress status", family: OpenAIResponses,
+			body: "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"in_progress\"," +
+				"\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\n",
+			wantErr: ErrTruncated},
+		{name: "responses completed with in_progress status and null usage", family: OpenAIResponses,
+			body: "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"in_progress\"," +
+				"\"usage\":null}}\n\n",
+			wantErr: ErrTruncated},
+		{name: "responses completed with unknown status fails closed", family: OpenAIResponses,
+			body: "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"pending\"," +
+				"\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\n",
+			wantErr: ErrTruncated},
+		{name: "responses completed with cancelled status", family: OpenAIResponses,
+			body: "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"cancelled\"," +
+				"\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\n",
+			want: Usage{Family: OpenAIResponses, InputTokens: 2, OutputTokens: 3}},
+		{name: "chat stream total below parts", family: OpenAIChat,
+			body: "data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"total_tokens\":10}}\n\n" +
+				"data: [DONE]\n\n",
+			wantErr: ErrOutOfRange},
+		{name: "chat stream total above parts kept in ReportedTotalTokens", family: OpenAIChat,
+			body: "data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"total_tokens\":20}}\n\n" +
+				"data: [DONE]\n\n",
+			want: Usage{Family: OpenAIChat, InputTokens: 9, OutputTokens: 2, ReportedTotalTokens: 20}},
+		{name: "chat stream total zero next to non-zero parts", family: OpenAIChat,
+			body: "data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"total_tokens\":0}}\n\n" +
+				"data: [DONE]\n\n",
+			want: Usage{Family: OpenAIChat, InputTokens: 9, OutputTokens: 2}},
+		{name: "chat stream reported total drops across chunks", family: OpenAIChat,
+			body: "data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"total_tokens\":20}}\n\n" +
+				"data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":5,\"total_tokens\":15}}\n\n" +
+				"data: [DONE]\n\n",
+			wantErr: ErrInconsistent,
+			want:    Usage{Family: OpenAIChat, InputTokens: 9, OutputTokens: 5, ReportedTotalTokens: 15}},
+		{name: "chat stream chunk without total after chunk with total", family: OpenAIChat,
+			body: "data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"total_tokens\":15}}\n\n" +
+				"data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2}}\n\n" +
+				"data: [DONE]\n\n",
+			want: Usage{Family: OpenAIChat, InputTokens: 9, OutputTokens: 2}},
+		{name: "chat stream chunk with zero total after chunk with total", family: OpenAIChat,
+			body: "data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"total_tokens\":15}}\n\n" +
+				"data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":5,\"total_tokens\":0}}\n\n" +
+				"data: [DONE]\n\n",
+			want: Usage{Family: OpenAIChat, InputTokens: 9, OutputTokens: 5}},
+		{name: "responses stream total below parts", family: OpenAIResponses,
+			body: "data: {\"type\":\"response.completed\",\"response\":" +
+				"{\"usage\":{\"input_tokens\":9,\"output_tokens\":2,\"total_tokens\":10}}}\n\n",
+			wantErr: ErrOutOfRange},
+		{name: "responses stream total above parts kept in ReportedTotalTokens", family: OpenAIResponses,
+			body: "data: {\"type\":\"response.completed\",\"response\":" +
+				"{\"usage\":{\"input_tokens\":9,\"output_tokens\":2,\"total_tokens\":20}}}\n\n",
+			want: Usage{Family: OpenAIResponses, InputTokens: 9, OutputTokens: 2, ReportedTotalTokens: 20}},
+		{name: "responses stream total zero next to non-zero parts", family: OpenAIResponses,
+			body: "data: {\"type\":\"response.completed\",\"response\":" +
+				"{\"usage\":{\"input_tokens\":9,\"output_tokens\":2,\"total_tokens\":0}}}\n\n",
+			want: Usage{Family: OpenAIResponses, InputTokens: 9, OutputTokens: 2}},
+		{name: "anthropic stream compaction survives omitted delta iterations", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
+				"\"iterations\":[{\"type\":\"compaction\",\"input_tokens\":80,\"output_tokens\":12}]}}}\n\n" +
+				delta + stop,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9,
+				CompactionInputTokens: 80, CompactionOutputTokens: 12}},
+		{name: "anthropic stream compaction grows across delta", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
+				"\"iterations\":[{\"type\":\"compaction\",\"input_tokens\":80,\"output_tokens\":12}]}}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9,\"iterations\":[" +
+				"{\"type\":\"compaction\",\"input_tokens\":80,\"output_tokens\":12}," +
+				"{\"type\":\"compaction\",\"input_tokens\":20,\"output_tokens\":3}]}}\n\n" + stop,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9,
+				CompactionInputTokens: 100, CompactionOutputTokens: 15}},
+		{name: "anthropic stream compaction dropped in delta", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
+				"\"iterations\":[{\"type\":\"compaction\",\"input_tokens\":80,\"output_tokens\":12}]}}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9,\"iterations\":[]}}\n\n" + stop,
+			wantErr: ErrInconsistent, want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}},
+		{name: "anthropic stream advisor survives omitted delta iterations", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1760," +
+				"\"cache_read_input_tokens\":412,\"output_tokens\":1," +
+				"\"iterations\":[{\"type\":\"advisor_message\",\"input_tokens\":823,\"output_tokens\":1612}]}}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":531}}\n\n" + stop,
+			want: Usage{Family: Anthropic, InputTokens: 1760, OutputTokens: 531, CacheReadInputTokens: 412,
+				AdvisorInputTokens: 823, AdvisorOutputTokens: 1612}},
+		{name: "anthropic stream advisor grows across delta", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
+				"\"iterations\":[{\"type\":\"advisor_message\",\"input_tokens\":80,\"output_tokens\":12}]}}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9,\"iterations\":[" +
+				"{\"type\":\"advisor_message\",\"input_tokens\":80,\"output_tokens\":12}," +
+				"{\"type\":\"advisor_message\",\"input_tokens\":20,\"output_tokens\":3}]}}\n\n" + stop,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9,
+				AdvisorInputTokens: 100, AdvisorOutputTokens: 15}},
+		{name: "anthropic stream advisor dropped in delta", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
+				"\"iterations\":[{\"type\":\"advisor_message\",\"input_tokens\":80,\"output_tokens\":12}]}}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9,\"iterations\":[]}}\n\n" + stop,
+			wantErr: ErrInconsistent, want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}},
+		{name: "anthropic stream iterations over 1024 entries", family: Anthropic,
+			body: start + "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9,\"iterations\":[" +
+				strings.Repeat("{},", 1500) +
+				"{\"type\":\"advisor_message\",\"input_tokens\":10,\"output_tokens\":20}]}}\n\n" + stop,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9,
+				AdvisorInputTokens: 10, AdvisorOutputTokens: 20}},
+		{name: "anthropic stream message iteration negative count", family: Anthropic,
+			body: start + "data: {\"type\":\"message_delta\",\"usage\":{\"iterations\":[" +
+				"{\"type\":\"message\",\"input_tokens\":-1}]}}\n\n" + stop,
+			wantErr: ErrOutOfRange, want: start1},
+		{name: "anthropic stream message iteration oversized count alone", family: Anthropic,
+			body: start + "data: {\"type\":\"message_delta\",\"usage\":{\"iterations\":[" +
+				"{\"type\":\"message\",\"input_tokens\":101}]}}\n\n" + stop,
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: 1024, MaxTokens: 100}, wantErr: ErrOutOfRange, want: start1},
+		{name: "anthropic stream fallback_message iteration oversized count", family: Anthropic,
+			body: start + "data: {\"type\":\"message_delta\",\"usage\":{\"iterations\":[" +
+				"{\"type\":\"fallback_message\",\"output_tokens\":101}]}}\n\n" + stop,
+			lim: Limits{MaxBytes: 4096, MaxLineBytes: 1024, MaxTokens: 100}, wantErr: ErrOutOfRange, want: start1},
+		{name: "anthropic stream advisor iteration negative count", family: Anthropic,
+			body: start + "data: {\"type\":\"message_delta\",\"usage\":{\"iterations\":[" +
+				"{\"type\":\"advisor_message\",\"output_tokens\":-1}]}}\n\n" + stop,
+			wantErr: ErrOutOfRange, want: start1},
+		{name: "anthropic stream unclassified survives omitted delta iterations", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
+				"\"iterations\":[{\"type\":\"advisor_message_v2\",\"input_tokens\":500,\"cache_read_input_tokens\":100," +
+				"\"output_tokens\":200}]}}}\n\n" + delta + stop,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9,
+				UnclassifiedIterationInputTokens: 600, UnclassifiedIterationOutputTokens: 200}},
+		{name: "anthropic stream unclassified grows across delta", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
+				"\"iterations\":[{\"type\":\"fallback_message\",\"input_tokens\":50,\"output_tokens\":10}]}}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9,\"iterations\":[" +
+				"{\"type\":\"fallback_message\",\"input_tokens\":50,\"output_tokens\":10}," +
+				"{\"type\":null,\"input_tokens\":20,\"cache_creation_input_tokens\":5,\"output_tokens\":4}]}}\n\n" + stop,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9,
+				UnclassifiedIterationInputTokens: 75, UnclassifiedIterationOutputTokens: 14}},
+		{name: "anthropic stream unclassified dropped in delta", family: Anthropic,
+			body: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1," +
+				"\"iterations\":[{\"type\":\"advisor_message_v2\",\"input_tokens\":50,\"output_tokens\":10}]}}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9,\"iterations\":[]}}\n\n" + stop,
+			wantErr: ErrInconsistent, want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}},
+		{name: "anthropic stream iteration without type negative count", family: Anthropic,
+			body: start + "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9,\"iterations\":[" +
+				"{\"input_tokens\":-1}]}}\n\n" + stop,
+			wantErr: ErrOutOfRange, want: start1},
+		{name: "anthropic stream empty iterations only is no usage", family: Anthropic,
+			body:    "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"iterations\":[]}}}\n\n",
+			wantErr: ErrTruncated},
+		{name: "zero line limit", family: Anthropic, body: start, lim: Limits{MaxBytes: 10, MaxTokens: 10},
+			wantErr: ErrInvalidLimits},
+	}
+}
+
+func TestParseStreamInline(t *testing.T) {
+	tests := streamInlineCases()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lim := tt.lim
+			if lim == (Limits{}) {
+				lim = testLimits
+			}
+			got, err := ParseStream(tt.family, strings.NewReader(tt.body), lim)
+			if !errors.Is(err, tt.wantErr) || (tt.wantErr == nil && err != nil) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("usage = %+v, want %+v", got, tt.want)
+			}
+			var (
+				pe *PartialError
+				te *TrailingError
+			)
+			wantPartial := err != nil && tt.want != (Usage{}) && !tt.trailing
+			if errors.As(err, &pe) != wantPartial || errors.As(err, &te) != tt.trailing {
+				t.Errorf("err = %#v, want a PartialError %v, a TrailingError %v", err, wantPartial, tt.trailing)
+			}
+		})
+	}
+}
+
+// errReader returns its data, then err.
+type errReader struct {
+	data string
+	err  error
+}
+
+func (e *errReader) Read(p []byte) (int, error) {
+	if e.data == "" {
+		return 0, e.err
+	}
+	n := copy(p, e.data)
+	e.data = e.data[n:]
+	return n, nil
+}
+
+func TestReaderErrorIsWrapped(t *testing.T) {
+	boom := errors.New("connection reset")
+	if _, err := ParseJSON(Anthropic, &errReader{data: `{"usage":`, err: boom}, testLimits); !errors.Is(err, boom) {
+		t.Errorf("ParseJSON err = %v, want the reader's error", err)
+	}
+	if _, err := ParseStream(Anthropic, &errReader{data: "data: {}\n", err: boom}, testLimits); !errors.Is(err, boom) {
+		t.Errorf("ParseStream err = %v, want the reader's error", err)
+	}
+}
+
+// TestLineEndsAcrossReads feeds a stream one byte at a time, so that a CR is read before the byte after it.
+func TestLineEndsAcrossReads(t *testing.T) {
+	const body = "data: {\"type\":\"message_start\",\"message\":" +
+		"{\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n" +
+		"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+	want := Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}
+	for _, end := range []string{"\n", "\r\n", "\r"} {
+		r := iotest.OneByteReader(strings.NewReader("\xEF\xBB\xBF" + strings.ReplaceAll(body, "\n", end)))
+		got, err := ParseStream(Anthropic, r, testLimits)
+		if err != nil || got != want {
+			t.Errorf("line end %q: usage = %+v, err = %v, want %+v", end, got, err, want)
+		}
+	}
+}
+
+func TestStreamReaderError(t *testing.T) {
+	const (
+		start = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n"
+		delta = "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n"
+		stop  = "data: {\"type\":\"message_stop\"}\n\n"
+		chat  = "data: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n"
+	)
+	cut := io.ErrUnexpectedEOF
+	tests := []struct {
+		name      string
+		family    Family
+		body      string
+		readErr   error
+		want      Usage
+		truncated bool
+		partial   bool // a *PartialError
+		trailing  bool // a *TrailingError
+	}{
+		{name: "anthropic cut after usage", family: Anthropic, body: start + delta, readErr: cut,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}, truncated: true, partial: true},
+		{name: "anthropic cut inside an event", family: Anthropic, body: start + "data: {\"type\":\"mess", readErr: cut,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 1}, truncated: true, partial: true},
+		{name: "chat cut before done", family: OpenAIChat, body: chat, readErr: cut,
+			want: Usage{Family: OpenAIChat, InputTokens: 7, OutputTokens: 2}, truncated: true, partial: true},
+		// A reader that fails before the final event truncates the stream, with or without usage.
+		{name: "cut before any usage", family: Anthropic, body: "data: {\"type\":\"ping\"}\n\n", readErr: cut,
+			truncated: true},
+		{name: "end before any usage", family: Anthropic, body: "data: {\"type\":\"ping\"}\n\n", readErr: io.EOF,
+			truncated: true},
+		{name: "end after usage", family: Anthropic, body: start, readErr: io.EOF,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 1}, truncated: true, partial: true},
+		// The final event was read, so the counts are final; the reader error is reported beside them.
+		{name: "cut after the final event", family: Anthropic, body: start + delta + stop, readErr: cut,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}, trailing: true},
+		{name: "end after the final event", family: Anthropic, body: start + delta + stop, readErr: io.EOF,
+			want: Usage{Family: Anthropic, InputTokens: 5, OutputTokens: 9}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseStream(tt.family, &errReader{data: tt.body, err: tt.readErr}, testLimits)
+			if got != tt.want {
+				t.Errorf("usage = %+v, want %+v", got, tt.want)
+			}
+			if errors.Is(err, ErrTruncated) != tt.truncated {
+				t.Errorf("err = %v, ErrTruncated %v, want %v", err, errors.Is(err, ErrTruncated), tt.truncated)
+			}
+			clean := errors.Is(tt.readErr, io.EOF) && !tt.truncated
+			if clean != (err == nil) {
+				t.Errorf("err = %v, want an error: %v", err, !clean)
+			}
+			if !errors.Is(tt.readErr, io.EOF) && !errors.Is(err, tt.readErr) {
+				t.Errorf("err = %v, want it to wrap the reader's error", err)
+			}
+			var (
+				pe *PartialError
+				te *TrailingError
+			)
+			if errors.As(err, &pe) != tt.partial || errors.As(err, &te) != tt.trailing {
+				t.Errorf("err = %#v, want a PartialError %v, a TrailingError %v", err, tt.partial, tt.trailing)
+			}
+		})
+	}
+}
+
+// errReadPastLimit ends a parse that asked a limitReader for more than it may read.
+var errReadPastLimit = errors.New("read past the limit")
+
+// limitReader never ends on its own. It fails the test, and returns an error so that the parse ends, when it
+// is asked for a byte past max+1 or for zero bytes, which a parser that lost its bound would do forever.
+type limitReader struct {
+	t   *testing.T
+	n   int64
+	max int64
+}
+
+func (r *limitReader) Read(p []byte) (int, error) {
+	if len(p) == 0 || r.n >= r.max+1 {
+		r.t.Errorf("read asked for %d bytes after %d, limit %d", len(p), r.n, r.max)
+		return 0, errReadPastLimit
+	}
+	p = p[:min(int64(len(p)), r.max+1-r.n)]
+	for i := range p {
+		p[i] = ' '
+		if (r.n+int64(i))%50 == 49 {
+			p[i] = '\n'
+		}
+	}
+	r.n += int64(len(p))
+	return len(p), nil
+}
+
+func TestReadingIsBounded(t *testing.T) {
+	lim := Limits{MaxBytes: 1 << 16, MaxLineBytes: 1 << 10, MaxTokens: 100}
+	for _, parse := range []func(Family, io.Reader, Limits) (Usage, error){ParseJSON, ParseStream} {
+		r := &limitReader{t: t, max: lim.MaxBytes}
+		if _, err := parse(OpenAIChat, r, lim); !errors.Is(err, ErrTooLarge) {
+			t.Errorf("err = %v, want ErrTooLarge", err)
+		}
+		if r.n != lim.MaxBytes+1 {
+			t.Errorf("read %d bytes, want the limit %d and one more", r.n, lim.MaxBytes)
+		}
+	}
+}
+
+func TestLimitError(t *testing.T) {
+	var le *LimitError
+	_, err := ParseJSON(Anthropic, strings.NewReader("{}  "), Limits{MaxBytes: 2, MaxTokens: 1})
+	if !errors.As(err, &le) || le.Line || le.Limit != 2 || errors.Is(err, ErrLineTooLong) {
+		t.Errorf("err = %#v, want a reply LimitError of 2 bytes", err)
+	}
+	_, err = ParseStream(Anthropic, strings.NewReader("data: 12345\n"), Limits{MaxBytes: 100, MaxLineBytes: 4,
+		MaxTokens: 1})
+	if !errors.As(err, &le) || !le.Line || le.Limit != 4 || errors.Is(err, ErrTooLarge) {
+		t.Errorf("err = %#v, want a line LimitError of 4 bytes", err)
+	}
+	if le.Error() == "" || (&LimitError{Limit: 1}).Error() == "" {
+		t.Error("empty error text")
+	}
+}

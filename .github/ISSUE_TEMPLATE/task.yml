@@ -14,7 +14,7 @@ body:
     attributes:
       label: Areas
       multiple: true
-      options: [redact, hygiene, audit, docs, ci, deps]
+      options: [modelusage, githost, redact, audit, hygiene, adr, ci, docs, deps, release]
     validations:
       required: true
   - type: textarea
@@ -52,7 +52,7 @@ body:
     id: verify
     attributes:
       label: How to verify
-      description: List the commands to run. For Go changes, include go test -race ./... when go.mod is present.
+      description: List the commands to run. For Go changes, include go test -race -count=1 ./... and, for a parser, a fuzz run.
     validations:
       required: true
   - type: dropdown
@@ -63,8 +63,11 @@ body:
       multiple: true
       options:
         - None
-        - Product independence
-        - Secrets and personal data stay private
+        - Depends on no product
+        - Standard library first
+        - No credentials, and no secret in output
+        - Every parser is bounded and fuzzed
+        - Public API and semantic versioning
     validations:
       required: true
   - type: textarea

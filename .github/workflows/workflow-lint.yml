@@ -1,5 +1,11 @@
 name: Workflow lint
 
+# Lints .github/workflows with actionlint (syntax, expressions, shellcheck of run blocks), the scripts under hack/
+# with shellcheck, and the workflows with zizmor (security audit: template injection, excessive permissions,
+# unpinned actions, credential persistence). Both tools are pinned; actionlint's download is checked against the
+# sha256 published with its release, and zizmor is installed with pip --require-hashes.
+# Run the same checks locally before changing a workflow: actionlint, then zizmor .github/workflows
+# Called by ci.yml (the only trigger); always runs.
 on:
   workflow_call:
 
@@ -12,7 +18,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Check out the repository
+      - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -24,14 +30,25 @@ jobs:
         run: |
           set -euo pipefail
           archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          # Retries ride out short outages of the release CDN.
           curl -fsSL --proto '=https' --connect-timeout 20 --max-time 60 --retry 4 --retry-delay 10 \
             -o "${RUNNER_TEMP}/${archive}" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
           echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
           tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}" actionlint
           "${RUNNER_TEMP}/actionlint" -color
 
+      - name: Run shellcheck
+        run: shellcheck hack/*.sh hack/test/*.sh
+
+      - name: Install zizmor
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/zizmor"
+          "${RUNNER_TEMP}/zizmor/bin/pip" install --quiet --no-deps --only-binary=:all: --require-hashes \
+            -r hack/zizmor-requirements.txt
+
+      # The token lets zizmor run its online audits (for example impostor commits and ref confusion).
       - name: Run zizmor
         env:
           GH_TOKEN: ${{ github.token }}
-          ZIZMOR_VERSION: 1.32.0
-        run: pipx run "zizmor==${ZIZMOR_VERSION}" .github/workflows
+        run: '"${RUNNER_TEMP}/zizmor/bin/zizmor" .github/workflows'

@@ -1,0 +1,12 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_test0001","object":"response","created_at":1700000000,"status":"in_progress","error":null,"incomplete_details":null,"model":"gpt-example","output":[],"usage":null}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_test0001","object":"response","created_at":1700000000,"status":"in_progress","error":null,"incomplete_details":null,"model":"gpt-example","output":[],"usage":null}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_test0003","output_index":1,"content_index":0,"delta":"The pod is out of memory."}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_test0001","object":"response","created_at":1700000000,"status":"completed","error":null,"incomplete_details":null,"model":"gpt-example","output":[{"type":"reasoning","id":"rs_test0001","summary":[]},{"type":"message","id":"msg_test0003","status":"completed","role":"assistant","content":[{"type":"output_text","text":"The pod is out of memory.","annotations":[]}]}],"usage":{"input_tokens":75,"input_tokens_details":{"cached_tokens":0},"output_tokens":1186,"output_tokens_details":{"reasoning_tokens":1024},"total_tokens":1261}}}
+

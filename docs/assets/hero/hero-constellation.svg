@@ -1,0 +1,370 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 760" width="1920" height="760" aria-hidden="true">
+  <defs>
+    <radialGradient id="cluster-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#8B3DFF" stop-opacity="0.06"/>
+      <stop offset="68%" stop-color="#8B3DFF" stop-opacity="0.018"/>
+      <stop offset="100%" stop-color="#8B3DFF" stop-opacity="0"/>
+    </radialGradient>
+    <style>
+      .cluster-aura { fill: url(#cluster-glow); }
+      .edge-i { stroke: #EFE6D2; stroke-opacity: 0.16; stroke-width: 0.9; }
+      .edge-v { stroke: #B794FF; stroke-opacity: 0.22; stroke-width: 0.95; }
+      .bridge { stroke: #EFE6D2; stroke-opacity: 0.11; stroke-width: 0.85; stroke-dasharray: 3 5; }
+      .bridge-sky { stroke: #EFE6D2; stroke-opacity: 0.085; stroke-width: 0.8; stroke-dasharray: 2 6; }
+      .dot-i { fill: #EFE6D2; fill-opacity: 0.62; }
+      .dot-v { fill: #B794FF; fill-opacity: 0.72; }
+      .halo-i { fill: #EFE6D2; fill-opacity: 0.11; }
+      .halo-v { fill: #8B3DFF; fill-opacity: 0.20; }
+      .dot-sky-i { fill: #EFE6D2; fill-opacity: 0.46; }
+      .dot-sky-v { fill: #B794FF; fill-opacity: 0.52; }
+      .halo-sky-i { fill: #EFE6D2; fill-opacity: 0.08; }
+      .halo-sky-v { fill: #8B3DFF; fill-opacity: 0.12; }
+
+      .p1-dot { animation: arm-pulse 21s ease-in-out -4s infinite; }
+      .p1-halo { animation: arm-halo 21s ease-in-out -4s infinite; }
+      .p2-dot { animation: arm-pulse 25s ease-in-out -10s infinite; }
+      .p2-halo { animation: arm-halo 25s ease-in-out -10s infinite; }
+      .p3-dot { animation: arm-pulse 23s ease-in-out -15s infinite; }
+      .p3-halo { animation: arm-halo 23s ease-in-out -15s infinite; }
+      .p4-dot { animation: arm-pulse 27s ease-in-out -7s infinite; }
+      .p4-halo { animation: arm-halo 27s ease-in-out -7s infinite; }
+      .p5-dot { animation: arm-pulse 22s ease-in-out -16s infinite; }
+      .p5-halo { animation: arm-halo 22s ease-in-out -16s infinite; }
+      .p6-dot { animation: arm-pulse 29s ease-in-out -12s infinite; }
+      .p6-halo { animation: arm-halo 29s ease-in-out -12s infinite; }
+
+      /* Single accent star: brightens slowly from ivory to violet and back over 26s. */
+      .accent-ivory-halo { fill: #EFE6D2; opacity: 0.14; animation: arm-accent-ivory-halo 26s ease-in-out -11s infinite; }
+      .accent-ivory-dot { fill: #EFE6D2; opacity: 0.70; animation: arm-accent-ivory 26s ease-in-out -11s infinite; }
+      .accent-violet-ring { fill: none; stroke: #B794FF; stroke-width: 1.1; opacity: 0; animation: arm-accent-ring 26s ease-out -11s infinite; }
+      .accent-violet-halo { fill: #8B3DFF; opacity: 0; animation: arm-accent-violet-halo 26s ease-in-out -11s infinite; }
+      .accent-violet-dot { fill: #B794FF; opacity: 0; animation: arm-accent-violet 26s ease-in-out -11s infinite; }
+
+      @keyframes arm-pulse {
+        0%, 100% { opacity: 0.44; }
+        50% { opacity: 0.90; }
+      }
+      @keyframes arm-halo {
+        0%, 100% { opacity: 0.08; transform: scale(0.85); }
+        50% { opacity: 0.28; transform: scale(1.24); }
+      }
+      @keyframes arm-accent-ivory {
+        0%, 24%, 76%, 100% { opacity: 0.72; }
+        44%, 56% { opacity: 0.14; }
+      }
+      @keyframes arm-accent-ivory-halo {
+        0%, 24%, 76%, 100% { opacity: 0.14; transform: scale(0.95); }
+        44%, 56% { opacity: 0.03; transform: scale(0.82); }
+      }
+      @keyframes arm-accent-violet {
+        0%, 24%, 76%, 100% { opacity: 0; }
+        44%, 56% { opacity: 0.94; }
+      }
+      @keyframes arm-accent-violet-halo {
+        0%, 24%, 76%, 100% { opacity: 0; transform: scale(0.82); }
+        48% { opacity: 0.38; transform: scale(1.25); }
+        58% { opacity: 0.24; transform: scale(1.06); }
+      }
+      @keyframes arm-accent-ring {
+        0%, 34% { opacity: 0; transform: scale(0.6); }
+        46% { opacity: 0.36; transform: scale(1.02); }
+        62%, 100% { opacity: 0; transform: scale(1.42); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .p1-dot, .p1-halo, .p2-dot, .p2-halo, .p3-dot, .p3-halo,
+        .p4-dot, .p4-halo, .p5-dot, .p5-halo, .p6-dot, .p6-halo,
+        .accent-ivory-halo, .accent-ivory-dot,
+        .accent-violet-ring, .accent-violet-halo, .accent-violet-dot {
+          animation: none;
+        }
+        .accent-violet-ring { opacity: 0; }
+        .accent-ivory-dot { opacity: 0.25; }
+        .accent-ivory-halo { opacity: 0.06; }
+        .accent-violet-dot { opacity: 0.82; }
+        .accent-violet-halo { opacity: 0.24; }
+      }
+    </style>
+  </defs>
+
+  <!-- Soft wing auras, kept outside the central text column -->
+  <ellipse class="cluster-aura" cx="290" cy="146" rx="205" ry="86"/>
+  <ellipse class="cluster-aura" cx="404" cy="364" rx="154" ry="104"/>
+  <ellipse class="cluster-aura" cx="292" cy="596" rx="198" ry="88"/>
+  <ellipse class="cluster-aura" cx="1632" cy="148" rx="200" ry="88"/>
+  <ellipse class="cluster-aura" cx="1522" cy="356" rx="154" ry="104"/>
+  <ellipse class="cluster-aura" cx="1636" cy="598" rx="200" ry="88"/>
+
+  <!-- Inter-group bridges -->
+  <line class="bridge" x1="316" y1="212" x2="334" y2="282"/>
+  <line class="bridge" x1="442" y1="142" x2="532" y2="278"/>
+  <line class="bridge" x1="176" y1="218" x2="232" y2="322"/>
+  <line class="bridge" x1="270" y1="406" x2="180" y2="508"/>
+  <line class="bridge" x1="362" y1="436" x2="380" y2="538"/>
+  <line class="bridge" x1="474" y1="450" x2="466" y2="602"/>
+  <line class="bridge" x1="1482" y1="148" x2="1456" y2="256"/>
+  <line class="bridge" x1="1608" y1="216" x2="1556" y2="304"/>
+  <line class="bridge" x1="1752" y1="232" x2="1668" y2="282"/>
+  <line class="bridge" x1="1420" y1="464" x2="1474" y2="584"/>
+  <line class="bridge" x1="1584" y1="426" x2="1564" y2="524"/>
+  <line class="bridge" x1="1702" y1="386" x2="1772" y2="502"/>
+
+  <!-- Short faint spurs from wing tips into the upper and lower sky -->
+  <line class="bridge-sky" x1="528" y1="92" x2="656" y2="58"/>
+  <line class="bridge-sky" x1="1388" y1="88" x2="1264" y2="62"/>
+  <line class="bridge-sky" x1="534" y1="646" x2="664" y2="686"/>
+  <line class="bridge-sky" x1="1396" y1="644" x2="1268" y2="682"/>
+
+  <!-- Constellation edges: left upper -->
+  <line class="edge-i" x1="66" y1="154" x2="160" y2="82"/>
+  <line class="edge-v" x1="160" y1="82" x2="256" y2="144"/>
+  <line class="edge-i" x1="256" y1="144" x2="352" y2="76"/>
+  <line class="edge-i" x1="352" y1="76" x2="442" y2="142"/>
+  <line class="edge-v" x1="442" y1="142" x2="528" y2="92"/>
+  <line class="edge-i" x1="442" y1="142" x2="316" y2="212"/>
+  <line class="edge-i" x1="316" y1="212" x2="256" y2="144"/>
+  <line class="edge-v" x1="256" y1="144" x2="176" y2="218"/>
+  <line class="edge-i" x1="176" y1="218" x2="66" y2="154"/>
+  <line class="edge-i" x1="160" y1="82" x2="176" y2="218"/>
+  <line class="edge-i" x1="316" y1="212" x2="176" y2="218"/>
+  <line class="edge-v" x1="352" y1="76" x2="316" y2="212"/>
+
+  <!-- Constellation edges: left middle -->
+  <line class="edge-i" x1="232" y1="322" x2="334" y2="282"/>
+  <line class="edge-v" x1="334" y1="282" x2="438" y2="338"/>
+  <line class="edge-v" x1="438" y1="338" x2="532" y2="278"/>
+  <line class="edge-i" x1="532" y1="278" x2="558" y2="388"/>
+  <line class="edge-i" x1="558" y1="388" x2="474" y2="450"/>
+  <line class="edge-v" x1="474" y1="450" x2="362" y2="436"/>
+  <line class="edge-i" x1="362" y1="436" x2="270" y2="406"/>
+  <line class="edge-i" x1="270" y1="406" x2="232" y2="322"/>
+  <line class="edge-i" x1="334" y1="282" x2="532" y2="278"/>
+  <line class="edge-i" x1="438" y1="338" x2="474" y2="450"/>
+  <line class="edge-v" x1="438" y1="338" x2="362" y2="436"/>
+  <line class="edge-i" x1="532" y1="278" x2="474" y2="450"/>
+  <line class="edge-i" x1="334" y1="282" x2="270" y2="406"/>
+
+  <!-- Constellation edges: left lower -->
+  <line class="edge-i" x1="72" y1="538" x2="180" y2="508"/>
+  <line class="edge-v" x1="180" y1="508" x2="266" y2="572"/>
+  <line class="edge-i" x1="266" y1="572" x2="380" y2="538"/>
+  <line class="edge-v" x1="380" y1="538" x2="466" y2="602"/>
+  <line class="edge-i" x1="466" y1="602" x2="534" y2="646"/>
+  <line class="edge-i" x1="466" y1="602" x2="344" y2="664"/>
+  <line class="edge-i" x1="344" y1="664" x2="266" y2="572"/>
+  <line class="edge-i" x1="266" y1="572" x2="196" y2="672"/>
+  <line class="edge-v" x1="196" y1="672" x2="96" y2="636"/>
+  <line class="edge-i" x1="96" y1="636" x2="72" y2="538"/>
+  <line class="edge-i" x1="180" y1="508" x2="196" y2="672"/>
+  <line class="edge-i" x1="344" y1="664" x2="196" y2="672"/>
+  <line class="edge-i" x1="380" y1="538" x2="344" y2="664"/>
+
+  <!-- Constellation edges: right upper -->
+  <line class="edge-i" x1="1388" y1="88" x2="1482" y2="148"/>
+  <line class="edge-v" x1="1482" y1="148" x2="1576" y2="74"/>
+  <line class="edge-i" x1="1576" y1="74" x2="1678" y2="130"/>
+  <line class="edge-i" x1="1678" y1="130" x2="1776" y2="82"/>
+  <line class="edge-v" x1="1776" y1="82" x2="1854" y2="162"/>
+  <line class="edge-i" x1="1854" y1="162" x2="1752" y2="232"/>
+  <line class="edge-i" x1="1752" y1="232" x2="1678" y2="130"/>
+  <line class="edge-v" x1="1678" y1="130" x2="1608" y2="216"/>
+  <line class="edge-i" x1="1608" y1="216" x2="1482" y2="148"/>
+  <line class="edge-i" x1="1576" y1="74" x2="1608" y2="216"/>
+  <line class="edge-i" x1="1608" y1="216" x2="1752" y2="232"/>
+  <line class="edge-i" x1="1776" y1="82" x2="1752" y2="232"/>
+
+  <!-- Constellation edges: right middle -->
+  <line class="edge-i" x1="1370" y1="298" x2="1456" y2="256"/>
+  <line class="edge-v" x1="1456" y1="256" x2="1556" y2="304"/>
+  <line class="edge-i" x1="1556" y1="304" x2="1668" y2="282"/>
+  <line class="edge-i" x1="1668" y1="282" x2="1702" y2="386"/>
+  <line class="edge-v" x1="1702" y1="386" x2="1584" y2="426"/>
+  <line class="edge-i" x1="1584" y1="426" x2="1474" y2="380"/>
+  <line class="edge-v" x1="1474" y1="380" x2="1456" y2="256"/>
+  <line class="edge-i" x1="1474" y1="380" x2="1556" y2="304"/>
+  <line class="edge-i" x1="1474" y1="380" x2="1420" y2="464"/>
+  <line class="edge-i" x1="1420" y1="464" x2="1362" y2="394"/>
+  <line class="edge-v" x1="1362" y1="394" x2="1370" y2="298"/>
+  <line class="edge-i" x1="1370" y1="298" x2="1474" y2="380"/>
+  <line class="edge-i" x1="1584" y1="426" x2="1420" y2="464"/>
+  <line class="edge-i" x1="1556" y1="304" x2="1584" y2="426"/>
+
+  <!-- Constellation edges: right lower -->
+  <line class="edge-i" x1="1396" y1="644" x2="1474" y2="584"/>
+  <line class="edge-v" x1="1474" y1="584" x2="1564" y2="524"/>
+  <line class="edge-i" x1="1564" y1="524" x2="1676" y2="554"/>
+  <line class="edge-i" x1="1676" y1="554" x2="1772" y2="502"/>
+  <line class="edge-v" x1="1772" y1="502" x2="1856" y2="570"/>
+  <line class="edge-i" x1="1856" y1="570" x2="1786" y2="668"/>
+  <line class="edge-i" x1="1786" y1="668" x2="1676" y2="554"/>
+  <line class="edge-i" x1="1676" y1="554" x2="1646" y2="676"/>
+  <line class="edge-v" x1="1646" y1="676" x2="1524" y2="670"/>
+  <line class="edge-i" x1="1524" y1="670" x2="1396" y2="644"/>
+  <line class="edge-i" x1="1474" y1="584" x2="1524" y2="670"/>
+  <line class="edge-i" x1="1564" y1="524" x2="1646" y2="676"/>
+  <line class="edge-i" x1="1786" y1="668" x2="1646" y2="676"/>
+
+  <!-- Stars and halos: left upper -->
+  <circle class="halo-i" cx="66" cy="154" r="5.4"/>
+  <circle class="dot-i" cx="66" cy="154" r="2.4"/>
+  <g transform="translate(160, 82)">
+    <circle class="halo-v p1-halo" r="8.2"/>
+    <circle class="dot-v p1-dot" r="2.8"/>
+  </g>
+  <circle class="halo-i" cx="256" cy="144" r="6.8"/>
+  <circle class="dot-i" cx="256" cy="144" r="3.1"/>
+  <circle class="halo-i" cx="352" cy="76" r="5.5"/>
+  <circle class="dot-i" cx="352" cy="76" r="2.5"/>
+  <circle class="halo-v" cx="442" cy="142" r="6.2"/>
+  <circle class="dot-v" cx="442" cy="142" r="2.7"/>
+  <circle class="halo-i" cx="528" cy="92" r="5.4"/>
+  <circle class="dot-i" cx="528" cy="92" r="2.4"/>
+  <circle class="halo-i" cx="316" cy="212" r="5.8"/>
+  <circle class="dot-i" cx="316" cy="212" r="2.6"/>
+  <circle class="halo-i" cx="176" cy="218" r="5.5"/>
+  <circle class="dot-i" cx="176" cy="218" r="2.5"/>
+
+  <!-- Stars and halos: left middle -->
+  <circle class="halo-i" cx="232" cy="322" r="5.6"/>
+  <circle class="dot-i" cx="232" cy="322" r="2.5"/>
+  <circle class="halo-i" cx="334" cy="282" r="6.0"/>
+  <circle class="dot-i" cx="334" cy="282" r="2.7"/>
+  <!-- Accent star: brightens from ivory to violet and back over 26s -->
+  <g transform="translate(438, 338)">
+    <circle class="accent-violet-ring" r="16"/>
+    <circle class="accent-ivory-halo" r="8"/>
+    <circle class="accent-violet-halo" r="11"/>
+    <circle class="accent-ivory-dot" r="3.2"/>
+    <circle class="accent-violet-dot" r="3.8"/>
+  </g>
+  <circle class="halo-i" cx="532" cy="278" r="6.4"/>
+  <circle class="dot-i" cx="532" cy="278" r="2.9"/>
+  <circle class="halo-v" cx="558" cy="388" r="6.0"/>
+  <circle class="dot-v" cx="558" cy="388" r="2.6"/>
+  <g transform="translate(474, 450)">
+    <circle class="halo-i p2-halo" r="8.6"/>
+    <circle class="dot-i p2-dot" r="3.1"/>
+  </g>
+  <circle class="halo-v" cx="362" cy="436" r="5.8"/>
+  <circle class="dot-v" cx="362" cy="436" r="2.5"/>
+  <circle class="halo-i" cx="270" cy="406" r="5.2"/>
+  <circle class="dot-i" cx="270" cy="406" r="2.3"/>
+
+  <!-- Stars and halos: left lower -->
+  <circle class="halo-i" cx="72" cy="538" r="5.4"/>
+  <circle class="dot-i" cx="72" cy="538" r="2.4"/>
+  <circle class="halo-v" cx="180" cy="508" r="6.2"/>
+  <circle class="dot-v" cx="180" cy="508" r="2.7"/>
+  <g transform="translate(266, 572)">
+    <circle class="halo-i p3-halo" r="8.4"/>
+    <circle class="dot-i p3-dot" r="3.0"/>
+  </g>
+  <circle class="halo-i" cx="380" cy="538" r="5.6"/>
+  <circle class="dot-i" cx="380" cy="538" r="2.5"/>
+  <circle class="halo-v" cx="466" cy="602" r="6.4"/>
+  <circle class="dot-v" cx="466" cy="602" r="2.8"/>
+  <circle class="halo-i" cx="534" cy="646" r="5.2"/>
+  <circle class="dot-i" cx="534" cy="646" r="2.3"/>
+  <circle class="halo-i" cx="344" cy="664" r="5.6"/>
+  <circle class="dot-i" cx="344" cy="664" r="2.5"/>
+  <circle class="halo-i" cx="196" cy="672" r="5.8"/>
+  <circle class="dot-i" cx="196" cy="672" r="2.6"/>
+  <circle class="halo-v" cx="96" cy="636" r="5.5"/>
+  <circle class="dot-v" cx="96" cy="636" r="2.4"/>
+
+  <!-- Stars and halos: right upper -->
+  <circle class="halo-i" cx="1388" cy="88" r="5.4"/>
+  <circle class="dot-i" cx="1388" cy="88" r="2.4"/>
+  <circle class="halo-v" cx="1482" cy="148" r="6.4"/>
+  <circle class="dot-v" cx="1482" cy="148" r="2.8"/>
+  <circle class="halo-i" cx="1576" cy="74" r="6.0"/>
+  <circle class="dot-i" cx="1576" cy="74" r="2.7"/>
+  <g transform="translate(1678, 130)">
+    <circle class="halo-i p4-halo" r="8.8"/>
+    <circle class="dot-i p4-dot" r="3.1"/>
+  </g>
+  <circle class="halo-i" cx="1776" cy="82" r="5.4"/>
+  <circle class="dot-i" cx="1776" cy="82" r="2.4"/>
+  <circle class="halo-v" cx="1854" cy="162" r="5.8"/>
+  <circle class="dot-v" cx="1854" cy="162" r="2.5"/>
+  <circle class="halo-i" cx="1752" cy="232" r="6.0"/>
+  <circle class="dot-i" cx="1752" cy="232" r="2.7"/>
+  <circle class="halo-i" cx="1608" cy="216" r="5.6"/>
+  <circle class="dot-i" cx="1608" cy="216" r="2.5"/>
+
+  <!-- Stars and halos: right middle -->
+  <circle class="halo-i" cx="1370" cy="298" r="6.0"/>
+  <circle class="dot-i" cx="1370" cy="298" r="2.7"/>
+  <g transform="translate(1456, 256)">
+    <circle class="halo-v p5-halo" r="9.0"/>
+    <circle class="dot-v p5-dot" r="3.2"/>
+  </g>
+  <circle class="halo-i" cx="1556" cy="304" r="6.2"/>
+  <circle class="dot-i" cx="1556" cy="304" r="2.8"/>
+  <circle class="halo-i" cx="1668" cy="282" r="5.6"/>
+  <circle class="dot-i" cx="1668" cy="282" r="2.5"/>
+  <circle class="halo-v" cx="1702" cy="386" r="6.0"/>
+  <circle class="dot-v" cx="1702" cy="386" r="2.6"/>
+  <circle class="halo-i" cx="1584" cy="426" r="6.6"/>
+  <circle class="dot-i" cx="1584" cy="426" r="3.0"/>
+  <circle class="halo-v" cx="1474" cy="380" r="6.6"/>
+  <circle class="dot-v" cx="1474" cy="380" r="2.9"/>
+  <circle class="halo-i" cx="1420" cy="464" r="5.8"/>
+  <circle class="dot-i" cx="1420" cy="464" r="2.6"/>
+  <circle class="halo-i" cx="1362" cy="394" r="5.4"/>
+  <circle class="dot-i" cx="1362" cy="394" r="2.4"/>
+
+  <!-- Stars and halos: right lower -->
+  <circle class="halo-i" cx="1396" cy="644" r="5.4"/>
+  <circle class="dot-i" cx="1396" cy="644" r="2.4"/>
+  <circle class="halo-i" cx="1474" cy="584" r="6.0"/>
+  <circle class="dot-i" cx="1474" cy="584" r="2.7"/>
+  <circle class="halo-v" cx="1564" cy="524" r="6.4"/>
+  <circle class="dot-v" cx="1564" cy="524" r="2.8"/>
+  <g transform="translate(1676, 554)">
+    <circle class="halo-i p6-halo" r="8.8"/>
+    <circle class="dot-i p6-dot" r="3.1"/>
+  </g>
+  <circle class="halo-i" cx="1772" cy="502" r="5.6"/>
+  <circle class="dot-i" cx="1772" cy="502" r="2.5"/>
+  <circle class="halo-v" cx="1856" cy="570" r="5.8"/>
+  <circle class="dot-v" cx="1856" cy="570" r="2.5"/>
+  <circle class="halo-i" cx="1786" cy="668" r="5.8"/>
+  <circle class="dot-i" cx="1786" cy="668" r="2.6"/>
+  <circle class="halo-i" cx="1646" cy="676" r="5.6"/>
+  <circle class="dot-i" cx="1646" cy="676" r="2.5"/>
+  <circle class="halo-v" cx="1524" cy="670" r="5.5"/>
+  <circle class="dot-v" cx="1524" cy="670" r="2.4"/>
+
+  <!-- Sparse single sky stars above and below the central text column -->
+  <circle class="halo-sky-i" cx="656" cy="58" r="4.6"/>
+  <circle class="dot-sky-i" cx="656" cy="58" r="2.1"/>
+  <circle class="halo-sky-v" cx="786" cy="40" r="5.0"/>
+  <circle class="dot-sky-v" cx="786" cy="40" r="2.2"/>
+  <circle class="halo-sky-i" cx="918" cy="72" r="4.4"/>
+  <circle class="dot-sky-i" cx="918" cy="72" r="2.0"/>
+  <circle class="halo-sky-i" cx="1058" cy="44" r="4.8"/>
+  <circle class="dot-sky-i" cx="1058" cy="44" r="2.2"/>
+  <circle class="halo-sky-i" cx="1164" cy="82" r="4.0"/>
+  <circle class="dot-sky-i" cx="1164" cy="82" r="1.8"/>
+  <circle class="halo-sky-v" cx="1264" cy="62" r="5.0"/>
+  <circle class="dot-sky-v" cx="1264" cy="62" r="2.2"/>
+
+  <circle class="halo-sky-i" cx="664" cy="686" r="4.6"/>
+  <circle class="dot-sky-i" cx="664" cy="686" r="2.1"/>
+  <circle class="halo-sky-v" cx="808" cy="712" r="4.8"/>
+  <circle class="dot-sky-v" cx="808" cy="712" r="2.1"/>
+  <circle class="halo-sky-i" cx="952" cy="692" r="4.6"/>
+  <circle class="dot-sky-i" cx="952" cy="692" r="2.1"/>
+  <circle class="halo-sky-i" cx="1116" cy="716" r="4.4"/>
+  <circle class="dot-sky-i" cx="1116" cy="716" r="2.0"/>
+  <circle class="halo-sky-v" cx="1268" cy="682" r="4.8"/>
+  <circle class="dot-sky-v" cx="1268" cy="682" r="2.1"/>
+
+  <!-- Outer rim ambient stars -->
+  <circle class="dot-sky-i" cx="44" cy="298" r="1.9"/>
+  <circle class="dot-sky-v" cx="130" cy="378" r="2.1"/>
+  <circle class="dot-sky-i" cx="50" cy="446" r="1.8"/>
+  <circle class="dot-sky-i" cx="1876" cy="306" r="1.9"/>
+  <circle class="dot-sky-v" cx="1796" cy="376" r="2.1"/>
+  <circle class="dot-sky-i" cx="1868" cy="442" r="1.8"/>
+</svg>

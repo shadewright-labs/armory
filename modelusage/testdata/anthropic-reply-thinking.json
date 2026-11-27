@@ -1,0 +1,37 @@
+{
+  "id": "msg_test0003",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-example",
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "The container restarts with exit code 137.",
+      "signature": "c2lnbmF0dXJl"
+    },
+    {
+      "type": "text",
+      "text": "The pod is out of memory."
+    }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 30,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "cache_creation": {
+      "ephemeral_5m_input_tokens": 0,
+      "ephemeral_1h_input_tokens": 0
+    },
+    "output_tokens": 420,
+    "output_tokens_details": {
+      "thinking_tokens": 380
+    },
+    "server_tool_use": {
+      "web_search_requests": 2,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard"
+  }
+}

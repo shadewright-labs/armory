@@ -26,4 +26,4 @@ Closes #
 
 ## Invariants
 
-<!-- If the change touches product independence or handling of sensitive data, explain how those rules still hold. -->
+<!-- If the change touches an invariant in AGENTS.md (no product dependency, standard library first, no secret in output, bounded and fuzzed parsers, API stability), explain how it still holds. -->

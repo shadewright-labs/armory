@@ -1,3 +1,5 @@
+# Weekly dependency updates. Titles follow Conventional Commits (chore(deps), ci(deps)) so they pass the
+# PR title check. A person reviews and merges every update. Armory has no Dockerfile, so there is no docker entry.
 version: 2
 updates:
   - package-ecosystem: gomod

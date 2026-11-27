@@ -1,0 +1,6 @@
+data: {"id":"chatcmpl-test0002","object":"chat.completion.chunk","created":1700000000,"model":"gpt-example","system_fingerprint":"fp_test","choices":[{"index":0,"delta":{"role":"assistant","content":"","refusal":null},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-test0002","object":"chat.completion.chunk","created":1700000000,"model":"gpt-example","system_fingerprint":"fp_test","choices":[{"index":0,"delta":{"content":"The pod is"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"error":{"message":"The server had an error while processing your request.","type":"server_error","param":null,"code":null}}
+
