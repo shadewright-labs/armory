@@ -31,6 +31,9 @@ const (
 	apiHost = "api.example.test"
 	evilURL = "https://evil.example.test/x"
 	hRetry  = "Retry-After"
+	// hRemaining is the rate limit header that says how many requests are left.
+	hRemaining = "X-RateLimit-Remaining"
+	hReset     = "X-RateLimit-Reset"
 	// at joins user information to a host in fixtures, so no fixture reads as an email address.
 	at            = "@"
 	template      = "/repos/{owner}/{repo}/things/{id}"
@@ -464,17 +467,17 @@ func TestRetryAfterAndRateLimits(t *testing.T) {
 		{"429 seconds", 429, map[string]string{hRetry: "3"}, "", []time.Duration{3 * time.Second}, 0, 2},
 		{"429 date", 429, map[string]string{hRetry: fixedNow.Add(5 * time.Second).Format(http.TimeFormat)}, "",
 			[]time.Duration{5 * time.Second}, 0, 2},
-		{"429 past date", 429, map[string]string{hRetry: fixedNow.Add(-time.Hour).Format(http.TimeFormat)}, "",
-			nil, time.Minute, 1},
+		{"429 past date retries at once", 429,
+			map[string]string{hRetry: fixedNow.Add(-time.Hour).Format(http.TimeFormat)}, "", nil, 0, 2},
 		{"429 too long", 429, map[string]string{hRetry: "60"}, "", nil, time.Minute, 1},
 		{"429 capped at an hour", 429, map[string]string{hRetry: "999999"}, "", nil, time.Hour, 1},
 		{"429 without headers", 429, nil, "", nil, time.Minute, 1},
-		{"403 quota reset", 403, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset}, "",
+		{"403 quota reset", 403, map[string]string{hRemaining: "0", hReset: reset}, "",
 			[]time.Duration{7 * time.Second}, 0, 2},
 		{"403 secondary", 403, nil, `{"message":"You have exceeded a secondary rate limit ` + bodyCanary + `"}`,
 			nil, time.Minute, 1},
 		{"403 unusable retry-after, quota reset", 403, map[string]string{hRetry: "soon",
-			"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset}, "", []time.Duration{7 * time.Second}, 0, 2},
+			hRemaining: "0", hReset: reset}, "", []time.Duration{7 * time.Second}, 0, 2},
 		{"503 retry-after", 503, map[string]string{hRetry: "2"}, bodyCanary, []time.Duration{2 * time.Second}, 0, 2},
 	}
 	for _, c := range cases {
@@ -1047,13 +1050,13 @@ func TestRateLimited(t *testing.T) {
 		want    time.Duration
 	}{
 		{"retry-after", resp(403, strings.NewReader(""), hRetry, "12"), true, 12 * time.Second},
-		{"quota reset", resp(403, strings.NewReader(""), "X-RateLimit-Remaining", "0",
-			"X-RateLimit-Reset", reset(45*time.Second)), true, 45 * time.Second},
-		{"quota reset in the past", resp(403, strings.NewReader(""), "X-RateLimit-Remaining", "0",
-			"X-RateLimit-Reset", reset(-time.Minute)), true, time.Minute},
+		{"quota reset", resp(403, strings.NewReader(""), hRemaining, "0",
+			hReset, reset(45*time.Second)), true, 45 * time.Second},
+		{"quota reset in the past", resp(403, strings.NewReader(""), hRemaining, "0",
+			hReset, reset(-time.Minute)), true, 0},
 		{"headerless 429", resp(429, strings.NewReader("")), true, time.Minute},
 		{"secondary 403", resp(403, strings.NewReader("You have exceeded a secondary rate limit"),
-			"X-RateLimit-Remaining", "10"), true, time.Minute},
+			hRemaining, "10"), true, time.Minute},
 		{"abuse 403", resp(403, strings.NewReader("Abuse Detection mechanism")), true, time.Minute},
 		{"marker past the probe", resp(403, strings.NewReader(strings.Repeat(" ", maxProbeBody)+"rate limit")),
 			false, 0},
@@ -1062,7 +1065,7 @@ func TestRateLimited(t *testing.T) {
 			err: io.ErrUnexpectedEOF}), true, time.Minute},
 	}
 	for _, c := range cases {
-		d, ok := rateLimited(c.r, fixedNow)
+		d, _, ok := rateLimited(c.r, fixedNow)
 		if ok != c.limited || d != c.want {
 			t.Errorf("%s: rateLimited = %v, %v; want %v, %v", c.name, d, ok, c.want, c.limited)
 		}

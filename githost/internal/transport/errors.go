@@ -27,6 +27,9 @@ func fixed(op, msg string) error { return errors.New("githost: " + op + ": " + m
 // finalError is the error a call ends with. Once an attempt of the write may have reached the host, it
 // says the outcome is unknown, next to its own cause.
 func finalError(op string, err error, mayHaveWritten bool) error {
+	if now, ok := err.(*retryNow); ok { //nolint:errorlint // only the top of the chain is this package's marker
+		err = now.err
+	}
 	if !mayHaveWritten || errors.Is(err, githost.ErrOutcomeUnknown) {
 		return err
 	}
@@ -68,8 +71,15 @@ func receiptError(ctx context.Context, op string, status int, cause error) error
 
 // refusedError is a refusal of the write check. Only the class of a valid *githost.Refusal in its
 // chain is kept, copied into a new Refusal; the check's text and identity are dropped.
-func refusedError(op string, err error) error {
+//
+// When the call's context ended during the check, the error also matches the end of the context, so a
+// caller that canceled learns it was its own cancellation; nothing was sent either way.
+func refusedError(ctx context.Context, op string, err error) error {
 	stopped := &githost.Error{Op: op, Kind: githost.ErrStoppedBeforeWrite}
+	if ctx.Err() != nil {
+		end := ctxError(op, ctx)
+		return &kindsError{msg: stopped.Error() + ": " + end.Error(), kinds: []error{stopped, end}}
+	}
 	var ref *githost.Refusal
 	if !errors.As(err, &ref) || ref == nil {
 		return stopped
@@ -97,11 +107,24 @@ func (c *Client) transportError(ctx context.Context, op string, err error) error
 			kinds: []error{head},
 		}
 	}
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("githost: %s: request canceled: %w", op, context.Canceled)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		// The attempt's own deadline passed.
+		return timedOut(op)
+	}
 	var ne net.Error
-	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
+	if errors.As(err, &ne) && ne.Timeout() {
 		return &githost.RetryableError{Err: fixed(op, "request timed out")}
 	}
 	return &githost.RetryableError{Err: fixed(op, "request failed (network)")}
+}
+
+// timedOut is the end of an attempt's deadline: retryable, and context.DeadlineExceeded as ADR-0001
+// asks of every deadline.
+func timedOut(op string) error {
+	return &githost.RetryableError{Err: fmt.Errorf("githost: %s: request timed out: %w", op, context.DeadlineExceeded)}
 }
 
 // ctxError reports the end of the call's context. A deadline is retryable by the caller; a cancellation
@@ -114,9 +137,13 @@ func ctxError(op string, ctx context.Context) error {
 }
 
 // credentialError replaces an error of the Credential, which may hold any text, with fixed text that
-// keeps only its class.
-func credentialError(op string, err error) error {
+// keeps only its class. When the call's context ended, its end is the class, whatever the credential
+// returned.
+func credentialError(ctx context.Context, op string, err error) error {
 	const msg = "credential unavailable"
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
 	switch {
 	case errors.Is(err, context.Canceled):
 		return fmt.Errorf("githost: %s: %s: %w", op, msg, context.Canceled)

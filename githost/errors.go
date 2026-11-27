@@ -104,7 +104,8 @@ func (e *Error) Unwrap() error {
 // RetryableError is a transient failure, with the delay to wait before retrying when one applies. It
 // matches [ErrRetryable] with [errors.Is], including a nil *RetryableError.
 type RetryableError struct {
-	// RetryAfter is the delay to wait before retrying, or zero when none applies. On errors from a
+	// RetryAfter is the delay to wait before retrying, or zero when none applies or the host asked to
+	// retry at once (Retry-After: 0, a past date or a passed reset). On errors from a
 	// client it is the delay the host asked for (Retry-After or rate limit reset), a delay a
 	// [Credential] asked for, or the client's one-minute fallback for a rate limit without a usable
 	// delay. The client caps every delay at one hour.

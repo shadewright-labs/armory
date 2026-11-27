@@ -1,6 +1,7 @@
 package retryafter
 
 import (
+	"errors"
 	"math"
 	"net/http"
 	"strconv"
@@ -22,30 +23,66 @@ var now = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 
 func TestParse(t *testing.T) {
 	const maxDelay = 10 * time.Minute
-	cases := map[string]time.Duration{
-		"":                    0,
-		"7":                   7 * time.Second,
-		" 7 ":                 7 * time.Second, //nolint:gocritic // spaces around the value are what this case checks
-		"0":                   0,
-		"-5":                  0,
-		"1.5":                 0,
-		"600":                 maxDelay,
-		"601":                 maxDelay,
-		"99999999999999":      maxDelay,
-		"9223372036854775807": maxDelay,
-		unusable:              0,
-		now.Add(20 * time.Second).Format(http.TimeFormat): 20 * time.Second,
-		now.Add(time.Hour).Format(http.TimeFormat):        maxDelay,
-		now.Add(-time.Minute).Format(http.TimeFormat):     0,
-		now.Add(20 * time.Second).Format(time.RFC850):     20 * time.Second,
+	type want struct {
+		d       time.Duration
+		invalid bool
 	}
-	for v, want := range cases {
-		if got := Parse(v, now, maxDelay); got != want {
-			t.Errorf("Parse(%q) = %s, want %s", v, got, want)
+	cases := map[string]want{
+		"":                    {0, true},
+		"7":                   {7 * time.Second, false},
+		" 7 ":                 {7 * time.Second, false}, //nolint:gocritic // spaces around the value are checked
+		"0":                   {0, false},
+		"-5":                  {0, true},
+		"1.5":                 {0, true},
+		"600":                 {maxDelay, false},
+		"601":                 {maxDelay, false},
+		"99999999999999":      {maxDelay, false},
+		"9223372036854775807": {maxDelay, false},
+		unusable:              {0, true},
+		now.Add(20 * time.Second).Format(http.TimeFormat): {20 * time.Second, false},
+		now.Add(time.Hour).Format(http.TimeFormat):        {maxDelay, false},
+		now.Add(-time.Minute).Format(http.TimeFormat):     {0, false},
+		now.Add(20 * time.Second).Format(time.RFC850):     {20 * time.Second, false},
+	}
+	for v, w := range cases {
+		got, err := Parse(v, now, maxDelay)
+		if got != w.d || errors.Is(err, ErrInvalid) != w.invalid || (err != nil && !w.invalid) {
+			t.Errorf("Parse(%q) = %s, %v; want %s, invalid %t", v, got, err, w.d, w.invalid)
 		}
 	}
-	if got := Parse("7", now, 0); got != 0 {
-		t.Errorf("Parse with no cap = %s, want 0", got)
+	if got, err := Parse("7", now, 0); got != 0 || err != nil {
+		t.Errorf("Parse with no cap = %s, %v; want 0, nil", got, err)
+	}
+}
+
+// TestZeroIsNotInvalid: "0" asks to retry at once and an unreadable value asks for nothing; the two
+// give the same delay, so only the error tells them apart.
+func TestZeroIsNotInvalid(t *testing.T) {
+	zero, zeroErr := Parse("0", now, time.Hour)
+	bad, badErr := Parse(unusable, now, time.Hour)
+	if zero != 0 || zeroErr != nil {
+		t.Errorf(`Parse("0") = %s, %v; want 0, nil`, zero, zeroErr)
+	}
+	if bad != 0 || !errors.Is(badErr, ErrInvalid) {
+		t.Errorf("Parse(unusable) = %s, %v; want 0, ErrInvalid", bad, badErr)
+	}
+	if strings.Contains(badErr.Error(), unusable) {
+		t.Errorf("error %q quotes the input", badErr)
+	}
+	if d, err := ParseReset("0", now, time.Hour); d != 0 || err != nil {
+		t.Errorf(`ParseReset("0") = %s, %v; want 0, nil`, d, err)
+	}
+	if d, err := ParseReset(unusable, now, time.Hour); d != 0 || !errors.Is(err, ErrInvalid) {
+		t.Errorf("ParseReset(unusable) = %s, %v; want 0, ErrInvalid", d, err)
+	}
+	if d, err := Header(http.Header{hRetry: {"0"}}, now, time.Hour); d != 0 || err != nil {
+		t.Errorf(`Header(Retry-After: 0) = %s, %v; want 0, nil`, d, err)
+	}
+	if d, err := Header(http.Header{hRetry: {unusable}}, now, time.Hour); d != 0 || !errors.Is(err, ErrInvalid) {
+		t.Errorf("Header(Retry-After: unusable) = %s, %v; want 0, ErrInvalid", d, err)
+	}
+	if d, err := Header(http.Header{}, now, time.Hour); d != 0 || !errors.Is(err, ErrMissing) {
+		t.Errorf("Header(none) = %s, %v; want 0, ErrMissing", d, err)
 	}
 }
 
@@ -55,41 +92,45 @@ func TestHeader(t *testing.T) {
 		name string
 		kv   []string
 		want time.Duration
+		err  error
 	}{
-		{"none", nil, 0},
-		{"retry-after seconds", []string{hRetry, "12"}, 12 * time.Second},
-		{"retry-after capped", []string{hRetry, "999999"}, time.Hour},
-		{"retry-after date", []string{hRetry, now.Add(20 * time.Second).Format(http.TimeFormat)}, 20 * time.Second},
+		{"none", nil, 0, ErrMissing},
+		{"retry-after seconds", []string{hRetry, "12"}, 12 * time.Second, nil},
+		{"retry-after capped", []string{hRetry, "999999"}, time.Hour, nil},
+		{"retry-after date", []string{hRetry, now.Add(20 * time.Second).Format(http.TimeFormat)}, 20 * time.Second, nil},
 		{"retry-after wins over reset", []string{hRetry, "3", hRemaining, "0",
-			hReset, reset(time.Minute)}, 3 * time.Second},
+			hReset, reset(time.Minute)}, 3 * time.Second, nil},
 		{"quota reset", []string{hRemaining, "0", hReset, reset(45 * time.Second)},
-			45 * time.Second},
+			45 * time.Second, nil},
 		{"quota reset capped", []string{hRemaining, "0", hReset, reset(48 * time.Hour)},
-			time.Hour},
+			time.Hour, nil},
 		{"quota reset huge", []string{hRemaining, "0", hReset, "9223372036854775807"},
-			time.Hour},
-		{"quota reset in the past", []string{hRemaining, "0", hReset, reset(-time.Minute)}, 0},
-		{"quota reset not a number", []string{hRemaining, "0", hReset, unusable}, 0},
-		{"quota left", []string{hRemaining, "10", hReset, reset(time.Minute)}, 0},
+			time.Hour, nil},
+		{"quota reset in the past", []string{hRemaining, "0", hReset, reset(-time.Minute)}, 0, nil},
+		{"quota reset not a number", []string{hRemaining, "0", hReset, unusable}, 0, ErrInvalid},
+		{"quota exhausted, no reset", []string{hRemaining, "0"}, 0, ErrInvalid},
+		{"quota left", []string{hRemaining, "10", hReset, reset(time.Minute)}, 0, ErrMissing},
 		{"retry-after zero wins over reset", []string{hRetry, "0", hRemaining, "0",
-			hReset, reset(time.Minute)}, 0},
+			hReset, reset(time.Minute)}, 0, nil},
 		{"retry-after unusable, reset used", []string{hRetry, unusable, hRemaining, "0",
-			hReset, reset(45 * time.Second)}, 45 * time.Second},
+			hReset, reset(45 * time.Second)}, 45 * time.Second, nil},
 		{"retry-after negative, reset used", []string{hRetry, "-5", hRemaining, "0",
-			hReset, reset(45 * time.Second)}, 45 * time.Second},
+			hReset, reset(45 * time.Second)}, 45 * time.Second, nil},
 		{"retry-after usable, reset unusable", []string{hRetry, "3", hRemaining, "0", hReset, unusable},
-			3 * time.Second},
-		{"both unusable", []string{hRetry, unusable, hRemaining, "0", hReset, "later"}, 0},
+			3 * time.Second, nil},
+		{"both unusable", []string{hRetry, unusable, hRemaining, "0", hReset, "later"}, 0, ErrInvalid},
+		{"retry-after empty", []string{hRetry, ""}, 0, ErrInvalid},
 		{"retry-after unusable, quota left", []string{hRetry, unusable, hRemaining, "10",
-			hReset, reset(time.Minute)}, 0},
+			hReset, reset(time.Minute)}, 0, ErrInvalid},
 	}
 	for _, c := range cases {
 		h := http.Header{}
 		for i := 0; i+1 < len(c.kv); i += 2 {
 			h.Set(c.kv[i], c.kv[i+1])
 		}
-		if got := Header(h, now, time.Hour); got != c.want {
-			t.Errorf("%s: Header = %s, want %s", c.name, got, c.want)
+		got, err := Header(h, now, time.Hour)
+		if got != c.want || !errors.Is(err, c.err) || (c.err == nil && err != nil) {
+			t.Errorf("%s: Header = %s, %v; want %s, %v", c.name, got, err, c.want, c.err)
 		}
 	}
 }
@@ -122,7 +163,10 @@ func FuzzParse(f *testing.F) {
 	f.Fuzz(func(t *testing.T, v string, nowUnix, nowNsec, capNs int64) {
 		at := time.Unix(nowUnix, nowNsec)
 		capDur := time.Duration(capNs)
-		d := Parse(v, at, capDur)
+		d, perr := Parse(v, at, capDur)
+		if perr != nil && (d != 0 || !errors.Is(perr, ErrInvalid)) {
+			t.Fatalf("Parse(%q) = %d, %v", v, d, perr)
+		}
 		if d < 0 || (capDur <= 0 && d != 0) || (capDur > 0 && d > capDur) {
 			t.Fatalf("Parse(%q, %v, %d) = %d", v, at, capDur, d)
 		}
@@ -133,7 +177,10 @@ func FuzzParse(f *testing.F) {
 				}
 			}
 		}
-		r := ParseReset(v, at, capDur)
+		r, rerr := ParseReset(v, at, capDur)
+		if rerr != nil && (r != 0 || !errors.Is(rerr, ErrInvalid)) {
+			t.Fatalf("ParseReset(%q) = %d, %v", v, r, rerr)
+		}
 		if r < 0 || (capDur <= 0 && r != 0) || (capDur > 0 && r > capDur) {
 			t.Fatalf("ParseReset(%q, %v, %d) = %d", v, at, capDur, r)
 		}
@@ -192,7 +239,10 @@ func FuzzHeader(f *testing.F) {
 		h.Set(hReset, reset)
 		at := time.Unix(nowUnix, nowNsec)
 		capDur := time.Duration(capNs)
-		d := Header(h, at, capDur)
+		d, herr := Header(h, at, capDur)
+		if herr != nil && d != 0 {
+			t.Fatalf("Header(%q, %q, %q) = %d, %v", retry, remaining, reset, d, herr)
+		}
 		if d < 0 || (capDur <= 0 && d != 0) || (capDur > 0 && d > capDur) {
 			t.Fatalf("Header(%q, %q, %q, %v, %d) = %d", retry, remaining, reset, at, capDur, d)
 		}
@@ -264,8 +314,12 @@ func TestParseResetAtTheLimits(t *testing.T) {
 		{"max cap huge reset", pastInt64Max, time.Unix(0, 0), math.MaxInt64, math.MaxInt64},
 	}
 	for _, c := range cases {
-		if got := ParseReset(c.v, c.now, c.maxDelay); got != c.want {
-			t.Errorf("%s: ParseReset(%q) = %s, want %s", c.name, c.v, got, c.want)
+		got, err := ParseReset(c.v, c.now, c.maxDelay)
+		if got != c.want {
+			t.Errorf("%s: ParseReset(%q) = %s, %v; want %s", c.name, c.v, got, err, c.want)
+		}
+		if signed := strings.HasPrefix(c.v, "-") || strings.HasPrefix(c.v, "+"); signed != errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: ParseReset(%q) error %v", c.name, c.v, err)
 		}
 	}
 }
@@ -273,10 +327,10 @@ func TestParseResetAtTheLimits(t *testing.T) {
 // TestInputByteLimit: oversized inputs are rejected without scanning unbounded leading zeroes.
 func TestInputByteLimit(t *testing.T) {
 	longZeroes := strings.Repeat("0", 65536) + "1"
-	if got := Parse(longZeroes, now, time.Hour); got != 0 {
-		t.Errorf("Parse(65536 zeroes + 1) = %s, want 0", got)
+	if got, err := Parse(longZeroes, now, time.Hour); got != 0 || !errors.Is(err, ErrInvalid) {
+		t.Errorf("Parse(65536 zeroes + 1) = %s, %v; want 0, ErrInvalid", got, err)
 	}
-	if got := ParseReset(longZeroes, now, time.Hour); got != 0 {
-		t.Errorf("ParseReset(65536 zeroes + 1) = %s, want 0", got)
+	if got, err := ParseReset(longZeroes, now, time.Hour); got != 0 || !errors.Is(err, ErrInvalid) {
+		t.Errorf("ParseReset(65536 zeroes + 1) = %s, %v; want 0, ErrInvalid", got, err)
 	}
 }

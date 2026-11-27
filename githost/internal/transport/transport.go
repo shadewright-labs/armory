@@ -19,9 +19,10 @@
 //   - never follows a redirect, and drops the Location header of a 3xx below the HTTP client, so a
 //     malformed one cannot hide the status. A 3xx answer to a read is an error with its status; a 3xx
 //     answer to a write also matches githost.ErrOutcomeUnknown, because a host may answer a write it
-//     carried out with one (303 after a POST). Blank or syntactically invalid If-None-Match values and
-//     unparsable If-Modified-Since dates are refused with githost.ErrRejected before any send; a 304 is
-//     accepted only for a GET or HEAD that sent a valid validator, and is an error otherwise;
+//     carried out with one (303 after a POST). New puts Config.Header keys in canonical form. Blank or
+//     syntactically invalid If-None-Match values and unparsable If-Modified-Since dates are refused with
+//     githost.ErrRejected before any send; a 304 is accepted only for a GET or HEAD that sent a valid
+//     validator, and is an error otherwise;
 //   - asks for the identity encoding and reads every 2xx body, except a HEAD answer's, with a bound the
 //     caller sets, counted in bytes as they arrive; it refuses a declared length over the bound before
 //     reading and returns githost.ErrTooLarge past it. A 2xx answer to a write whose body cannot be read
@@ -31,7 +32,14 @@
 //     client cannot decode;
 //   - retries reads, and writes marked idempotent, on network errors, timeouts, 408, 429, 5xx and rate
 //     limits, with exponential backoff and jitter, Retry-After and rate limit reset delays, and the
-//     context honoured during every wait; a write not marked idempotent is sent once;
+//     context honoured during every wait; a write not marked idempotent is sent once. A delay header
+//     that asks for none ("0", a past date, a reset that has passed) means the next attempt starts at
+//     once, within MaxAttempts; a rate limit whose headers hold no usable value waits a minute;
+//   - keeps the identity of the end of a context: an error caused by a cancellation matches
+//     context.Canceled, and one caused by the call's or an attempt's deadline matches
+//     context.DeadlineExceeded and is a githost.RetryableError (unless the write's outcome is unknown);
+//   - works on a copy of the Request taken when Do is called, so the caller's later changes to its body
+//     or query do not reach any attempt;
 //   - once an attempt of a write may have reached the host without an answer that says it did not
 //     write, returns every later failure of the call as githost.ErrOutcomeUnknown next to its own kind,
 //     an unusable receipt included. An answer that says the write was refused (a 4xx, a rate limit)
@@ -332,7 +340,7 @@ func New(cfg Config) (*Client, error) {
 		cred:       cfg.Credential,
 		check:      cfg.WriteCheck,
 		observe:    cfg.Observer,
-		header:     cfg.Header.Clone(),
+		header:     canonical(cfg.Header),
 		userAgent:  cfg.UserAgent,
 		attempts:   orDefault(cfg.MaxAttempts, DefaultMaxAttempts),
 		base:       orDefault(cfg.BaseDelay, DefaultBaseDelay),
@@ -359,6 +367,20 @@ func New(cfg Config) (*Client, error) {
 	}
 	c.httpClient = newHTTPClient(cfg.RoundTripper, cfg.Host, cfg.Proxy)
 	return c, nil
+}
+
+// canonical copies h with every key in canonical form, so a key in another case is checked and sent like
+// the canonical one, and values of keys that differ only in case are kept together.
+func canonical(h http.Header) http.Header {
+	if h == nil {
+		return nil
+	}
+	out := make(http.Header, len(h))
+	for k, vs := range h {
+		ck := http.CanonicalHeaderKey(k)
+		out[ck] = append(out[ck], vs...)
+	}
+	return out
 }
 
 func orDefault[T int | int64 | time.Duration](v, d T) T {
@@ -525,7 +547,11 @@ func onOrigin(u *url.URL, host string) bool {
 }
 
 // Do sends r, retrying transient failures. See the package documentation for the rules.
+//
+// Do works on a copy of r taken when it is called, so a caller that changes r.Body or r.Query while the
+// call runs changes nothing that is checked or sent.
 func (c *Client) Do(ctx context.Context, r Request) (Response, error) {
+	r = r.frozen()
 	u, err := c.buildURL(r)
 	if err != nil {
 		return Response{}, err
@@ -558,6 +584,22 @@ func (c *Client) Do(ctx context.Context, r Request) (Response, error) {
 			return Response{}, finalError(r.Op, werr, mayHaveWritten)
 		}
 	}
+}
+
+// frozen returns a copy of r that shares no slice or map with it. A nil body or query stays nil and an
+// empty one stays empty, since a nil body is sent without a Content-Type.
+func (r Request) frozen() Request {
+	if r.Body != nil {
+		r.Body = append(make([]byte, 0, len(r.Body)), r.Body...)
+	}
+	if r.Query != nil {
+		q := make(url.Values, len(r.Query))
+		for k, vs := range r.Query {
+			q[k] = append([]string(nil), vs...)
+		}
+		r.Query = q
+	}
+	return r
 }
 
 func isWrite(method string) bool { return method != http.MethodGet && method != http.MethodHead }
@@ -625,7 +667,7 @@ func (c *Client) once(ctx context.Context, r Request, u *url.URL, attempt int) (
 	// The credential is the product's: it gets the caller's context, values included.
 	tok, err := c.cred.Token(ctx, githost.Scope{Repo: c.repo, Write: write})
 	if err != nil {
-		return Response{}, false, credentialError(r.Op, err)
+		return Response{}, false, credentialError(ctx, r.Op, err)
 	}
 	var body io.Reader
 	if r.Body != nil {
@@ -708,14 +750,14 @@ func (c *Client) send(
 			return Response{}, false, ctxError(r.Op, ctx)
 		}
 		if err := c.check(ctx, Send{Op: r.Op, Method: r.Method, Template: r.Template, Attempt: attempt}); err != nil {
-			return Response{}, false, refusedError(r.Op, err)
+			return Response{}, false, refusedError(ctx, r.Op, err)
 		}
 	}
 	if ctx.Err() != nil {
 		return Response{}, false, ctxError(r.Op, ctx)
 	}
 	if actx.Err() != nil {
-		return Response{}, false, &githost.RetryableError{Err: fixed(r.Op, "request timed out")}
+		return Response{}, false, timedOut(r.Op)
 	}
 
 	start := time.Now()
@@ -755,9 +797,9 @@ func (c *Client) answer(
 		return c.receipt(ctx, actx, r, resp)
 	}
 	out, sent, err := c.classify(r, req, resp)
-	if err == nil && ctx.Err() != nil {
-		// An answer that raced the end of the call's context is not returned; whether it says the write
-		// was not carried out is kept.
+	if ctx.Err() != nil {
+		// An answer or error that raced the end of the call's context is not returned; whether it says the
+		// write was not carried out is kept.
 		return Response{}, sent, ctxError(r.Op, ctx)
 	}
 	return out, sent, err
@@ -815,16 +857,14 @@ func (c *Client) classify(r Request, req *http.Request, resp *http.Response) (Re
 		// answer a write it carried out with one (303 after a POST), so for a write the outcome is unknown.
 		return Response{}, write, &githost.Error{Op: r.Op, Status: code}
 	case code == http.StatusForbidden || code == http.StatusTooManyRequests:
-		if d, limited := rateLimited(resp, c.now()); limited {
+		if d, asked, limited := rateLimited(resp, c.now()); limited {
 			// A rate limit refused the request: nothing was carried out.
-			return Response{}, false, &githost.RetryableError{RetryAfter: d, Err: &githost.Error{Op: r.Op, Status: code}}
+			return Response{}, false, retryAfter(d, asked, &githost.Error{Op: r.Op, Status: code})
 		}
 		return Response{Status: code, Header: resp.Header}, false, nil
 	case code == http.StatusRequestTimeout || (code >= 500 && code <= 599):
-		return Response{}, write, &githost.RetryableError{
-			RetryAfter: retryafter.Header(resp.Header, c.now(), maxDelay),
-			Err:        &githost.Error{Op: r.Op, Status: code},
-		}
+		d, herr := retryafter.Header(resp.Header, c.now(), maxDelay)
+		return Response{}, write, retryAfter(d, herr == nil, &githost.Error{Op: r.Op, Status: code})
 	}
 	// A 4xx says the request was refused. Any other status says nothing about a write.
 	return Response{Status: code, Header: resp.Header}, write && (code < 400 || code > 499), nil
@@ -852,21 +892,39 @@ func readBounded(resp *http.Response, limit int64) ([]byte, error) {
 }
 
 // rateLimited reports whether a 403 or 429 is a rate limit, and the delay to wait: Retry-After, else
-// the reset of an exhausted quota, else a minute. A 429 is always a rate limit; a 403 without those
-// headers only when the start of its body names one, or cannot be read. The body is searched through a
-// bounded reader and never kept.
-func rateLimited(resp *http.Response, now time.Time) (time.Duration, bool) {
+// the reset of an exhausted quota, else a minute. asked reports that the headers asked for the delay,
+// which may be zero ("0", a past date or a reset that has passed: retry at once); an unreadable value
+// gets the minute. A 429 is always a rate limit; a 403 without those headers only when the start of its
+// body names one, or cannot be read. The body is searched through a bounded reader and never kept.
+func rateLimited(resp *http.Response, now time.Time) (d time.Duration, asked, limited bool) {
 	h := resp.Header
 	if h.Get("Retry-After") != "" || strings.TrimSpace(h.Get("X-RateLimit-Remaining")) == "0" {
-		if d := retryafter.Header(h, now, maxDelay); d > 0 {
-			return d, true
+		if d, err := retryafter.Header(h, now, maxDelay); err == nil {
+			return d, true, true
 		}
-		return secondaryWait, true
+		return secondaryWait, false, true
 	}
 	if resp.StatusCode == http.StatusTooManyRequests || mentionsRateLimit(resp.Body) {
-		return secondaryWait, true
+		return secondaryWait, false, true
 	}
-	return 0, false
+	return 0, false, false
+}
+
+// retryNow is a RetryableError whose answer asked for a delay of zero: the next attempt starts at once,
+// with no backoff. Do never returns it; finalError unwraps it.
+type retryNow struct{ err *githost.RetryableError }
+
+func (e *retryNow) Error() string { return e.err.Error() }
+func (e *retryNow) Unwrap() error { return e.err }
+
+// retryAfter is the retryable error of an answer that may be tried again after d. When the answer's
+// headers asked for a delay of zero, the next attempt is not delayed.
+func retryAfter(d time.Duration, asked bool, err error) error {
+	re := &githost.RetryableError{RetryAfter: d, Err: err}
+	if asked && d == 0 {
+		return &retryNow{err: re}
+	}
+	return re
 }
 
 // mentionsRateLimit reports whether the start of a body names a rate limit. A body that cannot be read
@@ -890,6 +948,10 @@ func (c *Client) backoff(ctx context.Context, op string, attempt int, err error)
 	if ctx.Err() != nil {
 		// The context ended during the attempt or the Observer: the call is over.
 		return ctxError(op, ctx)
+	}
+	if _, now := errors.AsType[*retryNow](err); now {
+		// The host asked for no delay. MaxAttempts and the deadline still bound the call.
+		return nil
 	}
 	d, asked := askedDelay(err)
 	if asked && d > c.maxWait {
