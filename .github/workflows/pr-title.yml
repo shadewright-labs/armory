@@ -39,6 +39,8 @@ jobs:
             redact
             audit
             hygiene
+            netguard
+            waitart
             adr
             ci
             docs
