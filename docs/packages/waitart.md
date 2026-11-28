@@ -20,19 +20,23 @@ Real output goes through `Player.Wrap(out)`. Before each write the frame is clea
 
 Each wrapped write holds the player's lock for the whole write: the clear, the write to `out`, its flush and the redraw. The player never draws, clears or sends a cursor sequence while `out` is written, and writes through `Wrap`, from any goroutine and through any writer of the same player, run one at a time, so a shared `bufio.Writer` needs no lock of its own. `out` must pass each write on before it returns; a writer with a `Flush() error` method, such as a `bufio.Writer`, is flushed after each write.
 
-`out` must not write through the same player. `Wrap` refuses a writer it made for the same player and returns a writer whose every write fails with `ErrNestedWrap`. A nested write it can only see when it happens, as in `p.Wrap(bufio.NewWriter(p.Wrap(term)))`, fails with `ErrNestedWrap` and makes the player inert, instead of waiting on the lock its own goroutine holds. `Stop` and `SetStatus` called from inside `out` do not wait: `Stop` marks the player stopped and the cursor show follows once the write returns.
+A buffered `out` must start empty and be written only through the wrapper. If a `bufio.Writer` already holds a prompt when it is wrapped, the first wrapped write flushes the prompt while the frame is on the screen, the player does not know about it, and a later redraw can erase it.
+
+The player does not support re-entry. A writer passed to `Start` or `Wrap`, and the `Config.Terminal` callback, must not call back into the same player while the player runs them, from any goroutine: no write through a writer of that player's `Wrap`, no `Stop` and no `SetStatus`, and no waiting on another goroutine that makes such a call. The call waits on the lock that write holds and may deadlock. The package catches one case, statically: `Wrap` given a writer it made for the same player, as in `p.Wrap(p.Wrap(term))`, returns a writer whose every write fails with `ErrNestedWrap`, writes nothing and has no effect on the player. Nesting through another writer, as in `p.Wrap(bufio.NewWriter(p.Wrap(term)))`, is not detected.
 
 The writer given to `Start` must deliver each write before it returns. The player never flushes it, so a buffered writer there could still hold a frame or the cursor show after `Stop` returns.
 
-The player tracks UTF-8 boundaries, not escape sequences. A caller must not leave a terminal escape sequence open across writes (`"\x1b[31"` in one write and `"m"` in the next) while `Stop` can run or the context can end, because the cursor show would land inside it.
+The player tracks UTF-8 boundaries, not escape sequences. A caller must not leave a terminal escape sequence open across writes (`"\x1b[31"` in one write and `"m"` in the next) while `Stop` can run, the context can end or the terminal can narrow, because the cursor show would land inside it. A narrowing counts too: the width check after each wrapped write can find the terminal narrower and send the cursor show before the caller's next write.
 
 Call `Start` once the output so far ends a line. The first frame is drawn from the start of the cursor's line, so a prompt printed before `Start` without a line break is drawn over. `Start` does not check this: the package cannot read the cursor position.
 
 ## When a write fails
 
-One rule covers every failed write. After any write or flush error, or a short write, on the terminal or on a writer passed to `Wrap` (a failed zero-length write included), and after a refused nested write, the player goes inert for good: it draws no frame, clears nothing, sends no cursor sequence (not even on `Stop`) and retries nothing. The caller's own bytes still pass through `Wrap` as given, one write at a time.
+One rule covers every failed write. After any write or flush error, or a short write, on the terminal or on a writer passed to `Wrap` (a failed zero-length write included), and after such a writer panics, the player goes inert for good: it draws no frame, clears nothing, sends no cursor sequence (not even on `Stop`) and retries nothing. The caller's own bytes still pass through `Wrap` as given, one write at a time.
 
 The cost: a failed write can leave the cursor hidden, or part of a frame on the screen. The player does not try to repair either, because a repair write after a partial one can land inside a rune or an escape sequence and corrupt the output that follows. Only the normal path ends with a clean clear and cursor show.
+
+A panic in a writer passed to `Start` or `Wrap`, or in the cleanup of `Stop`, reaches the caller with the player's lock given up, so a later wrapped write or `Stop` from any goroutine does not hang. A panic on the player's own frame goroutine ends the program, like any unrecovered panic.
 
 ## Width
 
@@ -40,10 +44,10 @@ The width is checked at these points:
 
 - in `Enabled`, before the first frame;
 - before each frame is written, after it is rendered, so after the cursor hide at start and after the clear of each redraw;
-- before a frame is cleared: at each frame tick while no partial line is on the screen, at the start of each non-empty wrapped write, and in `Stop`;
+- before a frame is cleared: at each frame tick, only while no partial output line is on the screen, at the start of each non-empty wrapped write, and in `Stop`;
 - after each non-empty wrapped write that succeeds, with or without a line break.
 
-It is not checked after a frame is written, nor between the clear at the start of a wrapped write and the end of that write. A terminal that narrows then is seen at the next check; until then the cursor stays hidden, for a whole frame delay when no output comes. When the terminal is narrower than 64 columns or stops being a terminal, the player draws no more frames and shows the cursor, and it does not clear the last frame, since the cursor-up count may no longer be right. A live width needs a `Config.Terminal` callback; the default reads `COLUMNS` once.
+It is not checked after a frame is written, nor between the clear at the start of a wrapped write and the end of that write. A terminal that narrows then is seen at the next check, and until then the cursor stays hidden. While a partial output line is on the screen, frame ticks do not check the width, so a narrowing is seen only at the next wrapped write or in `Stop`, which can be much later than one frame delay. When the terminal is narrower than 64 columns or stops being a terminal, the player draws no more frames and shows the cursor, and it does not clear the last frame, since the cursor-up count may no longer be right. A live width needs a `Config.Terminal` callback; the default reads `COLUMNS` once.
 
 ## Stopping and Ctrl-C
 

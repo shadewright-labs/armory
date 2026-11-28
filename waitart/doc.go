@@ -27,23 +27,34 @@
 // flush of the wrapped writer to the redraw. The player's own drawing never runs between the caller's
 // bytes, and writes through Wrap, from any goroutine and through any writer of the same player, run one
 // at a time. A writer passed to Wrap passes each write on before it returns, or has a Flush() error
-// method that Wrap calls. It must not write through the same player: Wrap refuses a writer it made for
-// that player, and a nested write it sees only when it happens, as in
-// p.Wrap(bufio.NewWriter(p.Wrap(term))), fails with [ErrNestedWrap] and makes the player inert, instead
-// of waiting on the lock its own goroutine holds.
+// method that Wrap calls. A buffered writer passed to Wrap starts empty and is written only through
+// the wrapper, since bytes it already held would be flushed while a frame is on the screen.
+//
+// The player does not support re-entry. A writer passed to Start or Wrap, and the [Config.Terminal]
+// callback, must not call back into the same player while the player runs them, from any goroutine:
+// no write through a writer of that player's Wrap, no [Player.Stop] and no [Player.SetStatus], and no
+// waiting on another goroutine that makes such a call. The call would wait on the lock that write
+// holds, and may deadlock. The one case the package catches is static: Wrap given a writer it made for
+// the same player, as in p.Wrap(p.Wrap(term)), returns a writer whose every write fails with
+// [ErrNestedWrap], writes nothing and has no effect on the player. Nesting through another writer, as
+// in p.Wrap(bufio.NewWriter(p.Wrap(term))), is not detected.
 //
 // The writer given to Start must deliver each write before it returns: the player never flushes it, so
 // a buffered writer could hold a frame or the cursor show after Stop has returned. The player tracks
 // UTF-8 boundaries, not escape sequences, so a caller must not leave a terminal escape sequence open
-// across writes (such as "\x1b[31" in one write and "m" in the next) while Stop can run or the context
-// can end: the cursor show would land inside it.
+// across writes (such as "\x1b[31" in one write and "m" in the next) while Stop can run, the context
+// can end or the terminal can narrow: the cursor show would land inside it. That includes the cleanup a
+// width check starts, such as the check after each wrapped write, which can send the cursor show
+// before the caller's next write.
 //
 // One rule covers failed writes: after any write or flush error, or a short write, on the terminal or
-// on a writer passed to Wrap (a zero-length write included), and after a refused nested write, the
+// on a writer passed to Wrap (a zero-length write included), and after such a writer panics, the
 // player goes inert for good. It draws no frame, clears nothing, sends
 // no cursor sequence and retries nothing; the caller's own bytes still pass through Wrap as given. The
 // cost is that a failed write can leave the cursor hidden, or part of a frame on the screen. Only the
-// normal path ends with a clean clear and cursor show.
+// normal path ends with a clean clear and cursor show. A panic in a writer passed to Start or Wrap,
+// or in Stop's cleanup, reaches the caller with the player's lock given up, so later calls do not
+// hang; a panic on the player's own frame goroutine ends the program like any unrecovered panic.
 //
 // The width is checked at these points: in Enabled, before the first frame; before each frame is
 // written, after it is rendered (so after the cursor hide at start and after the clear of each redraw);
@@ -51,7 +62,9 @@
 // each non-empty wrapped write and in Stop; and after each non-empty wrapped write that succeeds, with
 // or without a line break. It is not checked after a frame is written, nor between the clear at the
 // start of a wrapped write and the end of that write: a terminal that narrows then is seen at the next
-// check, and until then the cursor stays hidden, a whole frame delay when no output comes. When the
+// check, and until then the cursor stays hidden. Frame ticks check the width only while no partial
+// output line is on the screen; with a partial line there, a narrowing is seen at the next wrapped
+// write or in Stop, which can be much later than one frame delay. When the
 // terminal is narrower than [Width] columns or stops being a terminal, the player draws no more frames,
 // does not clear the last one (the cursor-up count may no longer hold) and shows the cursor.
 //
