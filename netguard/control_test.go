@@ -307,11 +307,11 @@ func TestControlInputs(t *testing.T) {
 		}
 	}
 	malformed := []struct{ network, address string }{
-		{netTCP, "example.com:443"},
+		{netTCP, nameHTTPS},
 		{netTCP, "localhost:443"},
 		{"unix", pub4HTTPS},
 		{"ip4:icmp", pub4},
-		{"udp", pub4DNS},
+		{netUDP, pub4DNS},
 		{"udp4", pub4DNS},
 		{"TCP", pub4HTTPS},
 		{"", pub4HTTPS},

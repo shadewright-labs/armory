@@ -5,6 +5,7 @@ const (
 	netTCP         = "tcp"
 	netTCP4        = "tcp4"
 	netTCP6        = "tcp6"
+	netUDP         = "udp"
 	pub4           = "8.8.8.8"
 	doc6           = "2001:db8::1"
 	relay6a44      = "192.88.99.2"
@@ -17,4 +18,5 @@ const (
 	loop6          = "::1"
 	pub4HTTPS      = pub4 + ":443"
 	pub4DNS        = pub4 + ":53"
+	nameHTTPS      = "example.com:443"
 )

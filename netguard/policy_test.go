@@ -142,6 +142,16 @@ func TestValidate(t *testing.T) {
 		if cerr := p.Control(netTCP4, pub4HTTPS, nil); !errors.Is(cerr, ErrInvalidPolicy) {
 			t.Errorf("%s: Control = %v, want ErrInvalidPolicy", name, cerr)
 		}
+		// Validate runs first: a malformed address does not hide the invalid policy.
+		for _, in := range []struct{ network, address string }{{netTCP, nameHTTPS}, {netUDP, pub4DNS}, {netTCP, pub4}} {
+			cerr := p.Control(in.network, in.address, nil)
+			if !errors.Is(cerr, ErrInvalidPolicy) || !errors.Is(cerr, ErrRefused) {
+				t.Errorf("%s: Control(%q, %q) = %v, want ErrInvalidPolicy and ErrRefused", name, in.network, in.address, cerr)
+			}
+			if xerr := p.ControlContext(t.Context(), in.network, in.address, nil); !errors.Is(xerr, ErrInvalidPolicy) {
+				t.Errorf("%s: ControlContext(%q, %q) = %v, want ErrInvalidPolicy", name, in.network, in.address, xerr)
+			}
+		}
 	}
 	good := map[string]Policy{
 		"zero":                {},

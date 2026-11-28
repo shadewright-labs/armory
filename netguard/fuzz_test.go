@@ -80,7 +80,7 @@ func FuzzClassify(f *testing.F) {
 func FuzzControl(f *testing.F) {
 	for _, c := range [][2]string{
 		{netTCP, pub4HTTPS}, {netTCP4, "127.0.0.1:80"}, {netTCP6, loop6HTTPS}, {netTCP6, "[64:ff9b::808:808]:1"},
-		{netTCP, "example.com:443"}, {"udp", pub4DNS}, {netTCP6, "[fe80::1%eth0]:443"}, {netTCP, "8.8.8.8:0443"},
+		{netTCP, nameHTTPS}, {netUDP, pub4DNS}, {netTCP6, "[fe80::1%eth0]:443"}, {netTCP, "8.8.8.8:0443"},
 		{netTCP6, "[fd00:64::808:808]:443"},
 	} {
 		f.Add(c[0], c[1])

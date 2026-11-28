@@ -14,7 +14,9 @@ const MaxControlAddrLen = 80
 // or tcp6 (TCP only; every other network is refused), address is at most 80 bytes, its host is an IP
 // literal of the network's family with no zone, its port is a decimal number from 1 to 65535 with no
 // sign or leading zero, and p allows the address. Every refusal is a *Refusal and matches ErrRefused; a
-// malformed network or address also matches ErrInvalidAddr. Control never reads or changes c.
+// malformed network or address also matches ErrInvalidAddr. Control validates p first, as Allow does:
+// when p does not validate, every refusal also matches ErrInvalidPolicy, whatever the address. Control
+// never reads or changes c.
 //
 // net.Dialer calls Control with the IP literal it resolved, after resolution and before connect, for
 // every address it tries and for every new connection, so a name that resolves to a public address once
@@ -22,7 +24,8 @@ const MaxControlAddrLen = 80
 func (p Policy) Control(network, address string, _ syscall.RawConn) error {
 	ip, ok := controlAddr(network, address)
 	if !ok {
-		return &Refusal{Class: Invalid, invalidAddr: true}
+		// Validate first, as Allow does, so an invalid Policy is reported whatever the address.
+		return &Refusal{Class: Invalid, invalidPolicy: p.Validate() != nil, invalidAddr: true}
 	}
 	return p.Allow(ip)
 }

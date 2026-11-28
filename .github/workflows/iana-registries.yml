@@ -105,6 +105,7 @@ jobs:
             esac
             title="netguard: IANA registry changed: ${name}"
             body="${RUNNER_TEMP}/body.md"
+            rows="${RUNNER_TEMP}/rows.txt"
             {
               echo "The weekly check found that \`${name}\` differs from the copy pinned under \`netguard/testdata/iana\`."
               echo "Update the pinned copy, \`DATES\`, the constants and \`netguard/table.go\` as ADR-0004 describes."
@@ -114,9 +115,21 @@ jobs:
               echo "Changed rows (\`-\` pinned, \`+\` current):"
               echo
               echo '~~~~text'
-              tr -d '\r' < "${file}" | sed 's/~~~~/~ ~ ~ ~/g'
-              echo '~~~~'
             } > "${body}"
+            # Break every run of four tildes, repeating until none is left, so no row can close the fence.
+            tr -d '\r' < "${file}" | LC_ALL=C sed -e ':a' -e 's/~~~~/~ ~ ~ ~/' -e 'ta' > "${rows}"
+            # The escaping makes rows longer, so bound the whole body: GitHub takes at most 65536 characters, and
+            # counting bytes (never fewer than characters) with a margin keeps it under that. Room is kept for the
+            # closing fence and the truncation notice; a cut row is dropped whole.
+            limit=65000
+            fence='~~~~'
+            notice="The rows were truncated to fit the issue body limit. The iana-diff artifact of the run holds all of them."
+            if [ $(( $(wc -c < "${body}") + $(wc -c < "${rows}") + ${#fence} + 1 )) -le "${limit}" ]; then
+              { cat "${rows}"; echo "${fence}"; } >> "${body}"
+            else
+              room=$(( limit - $(wc -c < "${body}") - ${#fence} - ${#notice} - 3 ))
+              { LC_ALL=C head -c "${room}" "${rows}" | LC_ALL=C sed '$d'; echo "${fence}"; echo; echo "${notice}"; } >> "${body}"
+            fi
             existing="$(gh issue list --state open --search "\"${title}\" in:title" --json number,title \
               --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
             if [ -n "${existing}" ]; then
