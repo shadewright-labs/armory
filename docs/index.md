@@ -21,7 +21,7 @@ hide:
 
 </div>
 
-Armory is the Go module `github.com/shadewright-labs/armory`. It holds code that more than one Shadewright Labs product needs. Today that is one package, `modelusage`, which reads the token usage a model provider reports. Redaction, hygiene checks and tamper-evident audit chains are planned.
+Armory is the Go module `github.com/shadewright-labs/armory`. It holds code that more than one Shadewright Labs product needs. Today that is `modelusage`, which reads the token usage a model provider reports, and `netguard`, which decides whether an IP address is public before a product dials it. Redaction, hygiene checks and tamper-evident audit chains are planned.
 
 Armory has no release yet, and its API can change until v1.0.0.
 
@@ -41,6 +41,7 @@ Four other invariants in [AGENTS.md](https://github.com/shadewright-labs/armory/
 | Package | What it is for | State |
 | --- | --- | --- |
 | [`modelusage`](packages/modelusage.md) | Reading the token usage a model provider reports in a reply (Anthropic Messages, OpenAI chat completions and Responses), complete or streamed, within byte limits the caller sets, with cache and reasoning tokens counted once | Available |
+| [`netguard`](packages/netguard.md) | Deciding whether an IP address is a public unicast address a product may dial, from the IANA special-purpose registries with a date, and refusing other addresses in a `net.Dialer` `Control` hook | Available |
 | Redaction | Hiding known secret forms in text from outside a product, in bounded time, before the text reaches a model, storage, logs or a person | Planned, next |
 | Hygiene checks | Checks a repository runs before publishing: emails, local paths and key-shaped literals in tracked files | Planned |
 | Audit chain | Chained audit records, so that an edit, a removed row or a truncated tail is detected | Planned |
@@ -51,5 +52,6 @@ These are the parts of the [six shared security laws](https://shadewrightlabs.co
 
 - [Use it](use.md) for the import path, Go version and pre-v1.0.0 fetching.
 - [`modelusage`](packages/modelusage.md) for the API, limits and stream result classes.
+- [`netguard`](packages/netguard.md) for the address classes, the dial policy and how the table stays current.
 - [Architecture decision records](adr/README.md) for how decisions are recorded.
 - [CI](ci.md) for the checks and release model.

@@ -51,3 +51,6 @@ jobs:
 
       - name: Test the workflows' structure
         run: hack/test/workflows_test.sh
+
+      - name: Test the IANA report issue body
+        run: hack/test/iana-registries_test.sh

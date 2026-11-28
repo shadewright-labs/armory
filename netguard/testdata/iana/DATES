@@ -1,0 +1,5 @@
+# The "Last updated" date of each pinned IANA registry copy in this directory. TestRegistryDates checks these
+# against the exported constants IPv4SpecialUpdated, IPv6SpecialUpdated and IPv6UnicastUpdated.
+iana-ipv4-special-registry-1.csv 2025-10-09
+iana-ipv6-special-registry-1.csv 2025-10-09
+ipv6-unicast-address-assignments.csv 2025-10-10
