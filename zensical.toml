@@ -16,6 +16,7 @@ nav = [
   { "Overview" = "index.md" },
   { "Packages" = [
     { "modelusage" = "packages/modelusage.md" },
+    { "waitart" = "packages/waitart.md" },
   ] },
   { "Use it" = "use.md" },
   { "Design and decisions" = [
