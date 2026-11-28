@@ -17,6 +17,7 @@ nav = [
   { "Packages" = [
     { "modelusage" = "packages/modelusage.md" },
     { "netguard" = "packages/netguard.md" },
+    { "waitart" = "packages/waitart.md" },
   ] },
   { "Use it" = "use.md" },
   { "Design and decisions" = [
