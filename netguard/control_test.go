@@ -374,3 +374,23 @@ func TestControlInputs(t *testing.T) {
 		t.Errorf("ControlContext(127.0.0.1) = %v", err)
 	}
 }
+
+// TestControlValidatesPolicyFirst checks that an invalid policy is the refusal whatever the address:
+// a well-formed address keeps its class and is not reported as malformed, a malformed one matches both.
+func TestControlValidatesPolicyFirst(t *testing.T) {
+	bad := Policy{Deny: []netip.Prefix{netip.MustParsePrefix("10.0.0.1/8")}}
+	err := bad.Control(netTCP4, pub4HTTPS, nil)
+	var r *Refusal
+	if !errors.As(err, &r) || !errors.Is(err, ErrInvalidPolicy) || !errors.Is(err, ErrRefused) ||
+		errors.Is(err, ErrInvalidAddr) || r.Class != Public {
+		t.Errorf("invalid policy, public address: %v, want ErrInvalidPolicy only with class public", err)
+	}
+	err = bad.Control(netTCP4, "8.8.8.8:0", nil)
+	if !errors.Is(err, ErrInvalidPolicy) || !errors.Is(err, ErrRefused) || !errors.Is(err, ErrInvalidAddr) {
+		t.Errorf("invalid policy, malformed address: %v, want ErrInvalidPolicy and ErrInvalidAddr", err)
+	}
+	err = Policy{}.Control(netTCP4, "8.8.8.8:0", nil)
+	if errors.Is(err, ErrInvalidPolicy) || !errors.Is(err, ErrInvalidAddr) {
+		t.Errorf("valid policy, malformed address: %v", err)
+	}
+}

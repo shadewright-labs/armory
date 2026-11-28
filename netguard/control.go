@@ -22,12 +22,19 @@ const MaxControlAddrLen = 80
 // every address it tries and for every new connection, so a name that resolves to a public address once
 // and to a loopback address later is refused on the connection that would reach the loopback address.
 func (p Policy) Control(network, address string, _ syscall.RawConn) error {
+	// Validate first, as Allow does, so an invalid Policy is reported whatever the address.
+	if p.Validate() != nil {
+		ip, ok := controlAddr(network, address)
+		if !ok {
+			return &Refusal{Class: Invalid, invalidPolicy: true, invalidAddr: true}
+		}
+		return &Refusal{Class: Classify(ip), invalidPolicy: true}
+	}
 	ip, ok := controlAddr(network, address)
 	if !ok {
-		// Validate first, as Allow does, so an invalid Policy is reported whatever the address.
-		return &Refusal{Class: Invalid, invalidPolicy: p.Validate() != nil, invalidAddr: true}
+		return &Refusal{Class: Invalid, invalidAddr: true}
 	}
-	return p.Allow(ip)
+	return p.allow(ip)
 }
 
 // ControlContext is Control for net.Dialer.ControlContext. It returns ctx.Err() unchanged when ctx is

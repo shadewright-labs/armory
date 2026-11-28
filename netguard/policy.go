@@ -116,6 +116,11 @@ func (p Policy) Allow(ip netip.Addr) error {
 	if err := p.Validate(); err != nil {
 		return &Refusal{Class: Classify(ip), invalidPolicy: true}
 	}
+	return p.allow(ip)
+}
+
+// allow is Allow for a policy that already validated.
+func (p Policy) allow(ip netip.Addr) error {
 	class := Classify(ip)
 	if class == Invalid || class == Zoned {
 		return &Refusal{Class: class}
