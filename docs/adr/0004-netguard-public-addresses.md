@@ -291,3 +291,14 @@ Read on 2026-11-27.
 - The three IANA registries in the table above.
 - RFC 6890 (special-purpose registries), RFC 8190 (their Globally Reachable column), RFC 6052 and RFC 8215 (NAT64 prefixes), RFC 3056 and RFC 7526 (6to4 and its deprecation), RFC 4291 (IPv4-compatible and IPv4-mapped forms), RFC 4380 (Teredo), RFC 9602 (SRv6 SIDs), RFC 9637 (`3fff::/20`).
 - Shadewright, on `main`: `internal/providers/model/openaiwire/client.go`, `openaicompatible/provider.go` and `declarations.go`, `vertexai/provider.go`, `vertexai/sts/sts.go`, `foundry/foundry.go`. Sablecourt, on `main`: `internal/gate/councilproxy/proxy.go`, and Sablecourt issue 104 (the `3fff::/20` miss).
+
+## Amendment, 2026-11-28 (Accepted 2026-11-28)
+
+The function that the Public API section above declares as `Public` is named `IsPublic`:
+
+```go
+// IsPublic reports whether Classify(ip) is Public.
+func IsPublic(ip netip.Addr) bool
+```
+
+Go does not allow the constant `Public` (a `Class`) and a function of the same name in one package, so the function takes the `Is` prefix. Its meaning is unchanged, and nothing else in this record changes.

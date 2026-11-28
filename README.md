@@ -32,6 +32,7 @@
 | Package | What it is for | State |
 | --- | --- | --- |
 | [`modelusage`](modelusage) | Reading the token usage a model provider reports in a reply (Anthropic Messages, OpenAI chat completions and Responses), complete or streamed, within byte limits the caller sets, with cache, reasoning, compaction and advisor tokens counted once | Available |
+| [`netguard`](netguard) | Deciding whether an IP address is a public unicast address a product may dial, from the IANA special-purpose registries with a date, and refusing other addresses in a `net.Dialer` `Control` hook | Available |
 | [`waitart`](waitart) | Drawing a short animated scene and a status line on a terminal while a command waits, without splitting real output; scenes and kinds of wait come from the product | Available |
 | Redaction | Hiding known secret forms in text from outside a product, in bounded time, before the text reaches a model, storage, logs or a person | Planned, next |
 | Hygiene checks | Checks a repository runs before publishing: emails, local paths and key-shaped literals in tracked files | Planned |
