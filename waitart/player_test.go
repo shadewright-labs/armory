@@ -300,8 +300,8 @@ func (s *shortWriter) Write(b []byte) (int, error) {
 	return n, nil
 }
 
-// TestFailedWritesNeverDrawMidLine checks that the player decides whether a line is finished from the
-// bytes that were written, not from the bytes the caller offered.
+// TestFailedWritesNeverDrawMidLine checks that a short or failed wrapped write makes the player inert:
+// no frame follows it, and Stop sends no cursor show.
 func TestFailedWritesNeverDrawMidLine(t *testing.T) {
 	errBoom := errors.New("boom")
 	for _, tc := range []struct {
@@ -327,14 +327,18 @@ func TestFailedWritesNeverDrawMidLine(t *testing.T) {
 			sw := &shortWriter{n: tc.keep, err: errBoom}
 			_, _ = io.WriteString(p.Wrap(sw), tc.then)
 			p.mu.Lock()
-			held := p.held
+			dead := p.dead
 			p.mu.Unlock()
-			if held == tc.wantDraws {
-				t.Fatalf("line held = %v, want %v", held, !tc.wantDraws)
+			if dead == tc.wantDraws {
+				t.Fatalf("inert = %v, want %v", dead, !tc.wantDraws)
 			}
 			drawn := strings.Contains(term.String()[mark:], "Waiting")
 			if drawn != tc.wantDraws {
 				t.Fatalf("frame drawn = %v, want %v; terminal got %q", drawn, tc.wantDraws, term.String()[mark:])
+			}
+			p.Stop()
+			if shown := strings.Contains(term.String()[mark:], showOnly); shown != tc.wantDraws {
+				t.Fatalf("cursor show sent = %v, want %v after the wrapped write", shown, tc.wantDraws)
 			}
 		})
 	}
@@ -430,8 +434,9 @@ func (s *scriptedWriter) Write(b []byte) (int, error) {
 	return n, errors.New("terminal went away")
 }
 
-// TestShortFrameWriteDisablesRedraws checks that a frame that did not reach the screen whole turns
-// redraws off and is never cleared with the cursor-up move, which would eat the lines above it.
+// TestShortFrameWriteDisablesRedraws checks that a frame that did not reach the screen whole makes the
+// player inert: it is never cleared with the cursor-up move, which would eat the lines above it, and
+// nothing else of the player follows, not even the cursor show.
 func TestShortFrameWriteDisablesRedraws(t *testing.T) {
 	// Call 1 is the cursor hide; call 2 is the first frame, cut short.
 	w := &scriptedWriter{full: 1, keep: 10}
@@ -446,8 +451,8 @@ func TestShortFrameWriteDisablesRedraws(t *testing.T) {
 	if strings.Contains(out, "Waiting") {
 		t.Fatalf("a frame was drawn after the failed write: %q", out)
 	}
-	if !strings.Contains(out, showCursor) {
-		t.Fatalf("the cursor was not shown again: %q", out)
+	if strings.Contains(out, showOnly) {
+		t.Fatalf("the cursor show was sent after a failed write: %q", out)
 	}
 }
 
@@ -488,15 +493,22 @@ func (f *flakyWriter) Write(b []byte) (int, error) {
 	return f.fakeTerm.Write(b)
 }
 
-// TestStopShowsCursorAfterFailedShowInDisable covers a frame write that fails together with the cursor
-// show inside disable, on a writer that recovers before Stop: Stop must still restore the cursor.
-func TestStopShowsCursorAfterFailedShowInDisable(t *testing.T) {
-	var term fakeTerm
-	w := &flakyWriter{fakeTerm: &term, failCalls: map[int]bool{2: true, 3: true}}
-	p := onTerminal(nil).Start(t.Context(), w, still(t, "relay"), "Waiting")
-	p.Stop()
-	if out := term.String(); !strings.HasSuffix(out, showCursor) {
-		t.Fatalf("output does not end with the show-cursor sequence: %q", out)
+// TestInertAfterFailedWrite fails one player write, on a writer that recovers at once: whatever failed
+// (the cursor hide, a frame, a clear), the player writes nothing more, Stop included, while real output
+// still passes through Wrap.
+func TestInertAfterFailedWrite(t *testing.T) {
+	for call := 1; call <= 3; call++ { // 1 hide, 2 first frame, 3 clear before the wrapped write
+		t.Run(fmt.Sprint(call), func(t *testing.T) {
+			var term fakeTerm
+			w := &flakyWriter{fakeTerm: &term, failCalls: map[int]bool{call: true}}
+			p := onTerminal(nil).Start(t.Context(), w, still(t, "relay"), "Waiting")
+			mark := len(term.String())
+			_, _ = io.WriteString(p.Wrap(w), "line\n")
+			p.Stop()
+			if after := term.String()[mark:]; after != "line\n" {
+				t.Fatalf("the player wrote after a failed write: %q", after)
+			}
+		})
 	}
 }
 
@@ -526,7 +538,7 @@ func TestNarrowedTerminalStopsDrawing(t *testing.T) {
 				deadline := time.Now().Add(5 * time.Second)
 				for time.Now().Before(deadline) {
 					p.mu.Lock()
-					off := p.disabled
+					off := p.off
 					p.mu.Unlock()
 					if off {
 						break

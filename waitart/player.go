@@ -123,10 +123,13 @@ type Player struct {
 	held      bool   // a partial output line is on the screen; draw nothing
 	tail      []byte // the last bytes of output, to tell whether it ends inside a rune
 	midRune   bool   // the output ends inside a UTF-8 sequence; write nothing to the terminal
+	busy      bool   // a wrapped write is with its writer, without the lock
+	overlap   bool   // another wrapped write ran while busy, so the order on the screen is unknown
 	stopped   bool
-	disabled  bool   // a write failed or the terminal narrowed; draw nothing more
-	shown     bool   // the cursor show was asked for
-	owed      string // bytes of the cursor show that have not reached the terminal yet
+	off       bool // the terminal narrowed or went away: no more frames
+	dead      bool // a write failed or came up short: write nothing to the terminal again
+	showAsked bool // the cursor show was asked for
+	showDue   bool // the cursor show was asked for and not sent yet
 	terminal  func(io.Writer) (int, bool)
 	ctx       context.Context
 
@@ -142,7 +145,7 @@ type Player struct {
 //
 // The first frame is drawn from the start of the line the cursor is on, so call Start once the output
 // so far ends a line: text printed before Start without a line break, such as a prompt, is drawn over.
-// The package cannot read the cursor position to tell.
+// Start does not check this, because the package cannot read the cursor position.
 func (c Config) Start(ctx context.Context, w io.Writer, sc Scene, status string) *Player {
 	if ctx == nil {
 		ctx = context.Background()
@@ -169,7 +172,7 @@ func (c Config) Start(ctx context.Context, w io.Writer, sc Scene, status string)
 	}
 	p.mu.Lock()
 	p.write(hideCursor)
-	p.draw()
+	p.draw() // checks the width again, after the cursor hide
 	p.mu.Unlock()
 	go p.run(ctx)
 	return p
@@ -196,11 +199,11 @@ func (p *Player) run(ctx context.Context) {
 		case <-t.C:
 		}
 		p.mu.Lock()
-		if !p.stopped && ctx.Err() == nil {
+		if !p.stopped && !p.busy && ctx.Err() == nil {
 			p.idx++
 			if !p.held && p.fits() {
 				p.clear()
-				p.draw()
+				p.draw() // checks the width again, after the clear
 			}
 		}
 		p.mu.Unlock()
@@ -208,60 +211,60 @@ func (p *Player) run(ctx context.Context) {
 }
 
 // Stop clears the frame and shows the cursor again. It is safe to call more than once and on a nil
-// Player, and it returns once the player has stopped drawing. When the terminal took only part of the
-// cursor show, a later Stop or write through [Player.Wrap] sends the rest. When output written through
-// Wrap ends inside a UTF-8 sequence, the cursor show waits for the write that completes it, so no byte
-// lands inside a rune.
+// Player, and it returns once the player has stopped drawing.
 //
-// Stop waits for a terminal write in progress: on a terminal whose writes block, such as a pipe nobody
-// reads, Stop blocks with it, and so do [Player.SetStatus] and writes through Wrap.
+// When output written through [Player.Wrap] ends inside a UTF-8 sequence, the cursor show waits for
+// the wrapped write that completes it, so no byte lands inside a rune; if that write never comes, the
+// cursor stays hidden. After a failed or short write the player is inert (see the package
+// documentation) and Stop writes nothing.
+//
+// Stop waits for a terminal write of the player in progress: on a terminal whose writes block, such as
+// a pipe nobody reads, Stop blocks with it, and so does [Player.SetStatus].
 func (p *Player) Stop() {
 	if p == nil {
 		return
 	}
 	p.stop()
 	<-p.done
-	p.mu.Lock()
-	p.payCursor()
-	p.mu.Unlock()
 }
 
 func (p *Player) stop() {
 	p.once.Do(func() {
 		p.mu.Lock()
-		// The width is checked first: on a narrowed terminal the cursor-up count no longer holds.
-		if p.drawn && p.fits() {
+		// The width is checked first: on a narrowed terminal the cursor-up count no longer holds. While
+		// a wrapped write is busy the frame is already cleared.
+		if p.drawn && !p.busy && p.fits() {
 			p.clear()
 		}
-		p.restoreCursor()
 		p.stopped = true
+		p.askShow()
 		p.mu.Unlock()
 		close(p.quit)
 	})
 }
 
-// restoreCursor asks for the cursor show and sends it unless the output ends inside a rune. It is
-// written directly, not through write, which refuses once drawing is disabled. The caller holds p.mu.
-func (p *Player) restoreCursor() {
-	if !p.shown {
-		p.shown = true
-		p.owed = showCursor
+// askShow asks for the cursor show once and sends it if it can go now. The caller holds p.mu.
+func (p *Player) askShow() {
+	if !p.showAsked {
+		p.showAsked, p.showDue = true, true
 	}
-	p.payCursor()
+	p.sendShow()
 }
 
-// payCursor sends the part of the cursor show that has not reached the terminal, when the output is at
-// a rune boundary. While a partial output line is on the screen the colour reset is left out, so the
-// caller's own colour stays. The caller holds p.mu.
-func (p *Player) payCursor() {
-	if p.owed == "" || p.midRune {
+// sendShow writes the cursor show that is due, in one write, unless the player is inert, a wrapped
+// write is busy or the output ends inside a rune; then it stays due. While a partial output line is on
+// the screen the colour reset is left out, so the caller's own colour stays. A failed or short show is
+// not sent again. The caller holds p.mu.
+func (p *Player) sendShow() {
+	if !p.showDue || p.dead || p.busy || p.midRune {
 		return
 	}
-	if p.owed == showCursor && p.held {
-		p.owed = showOnly
+	p.showDue = false
+	if p.held {
+		p.write(showOnly)
+	} else {
+		p.write(showCursor)
 	}
-	n, _ := io.WriteString(p.w, p.owed)
-	p.owed = p.owed[min(max(n, 0), len(p.owed)):]
 }
 
 // SetStatus changes the status line; the next frame shows it. It is safe to call from any goroutine
@@ -277,13 +280,21 @@ func (p *Player) SetStatus(status string) {
 
 // Wrap returns a writer for real output that shares the screen with the player: before each write the
 // frame is cleared, and once the output ends a line the frame is drawn again below it. A frame is
-// never drawn while a line is unfinished, so no frame byte lands inside an output line. Writes are
-// serialised with the frames. After Stop, writes pass straight to out. On a nil Player it returns out.
+// never drawn while a line is unfinished, so no frame byte lands inside an output line. After Stop,
+// writes pass straight to out. On a nil Player it returns out.
 //
 // The frame is drawn once out returns, so out must pass each write on to the terminal before it
 // returns. A buffered writer with a Flush() error method, such as a [bufio.Writer], is flushed after
-// each write, and when the flush fails no frame is drawn until a later line ends. Any other buffering
-// writer would let a frame land before bytes it still holds.
+// each write. Any other buffering writer would let a frame land before bytes it still holds.
+//
+// When a write to out fails or comes up short, or its flush fails, the player goes inert for good:
+// it draws, clears and sends nothing more, and later writes through Wrap pass straight to out.
+//
+// The player's lock is not held while out is written or flushed, so out may itself write through
+// another writer of the same player, as in p.Wrap(bufio.NewWriter(p.Wrap(term))). A wrapped write that
+// arrives while another is with its writer, nested like that or from another goroutine, passes
+// straight through, and the player draws no frame until a later wrapped write that runs alone ends a
+// line. The player does not order writes made through Wrap from several goroutines at once.
 //
 // Every writer Wrap returns shares one record of whether a line is unfinished, so all output that
 // shares the screen with the player, such as standard output and standard error on the same terminal,
@@ -300,45 +311,68 @@ type lineWriter struct {
 	out io.Writer
 }
 
+// pass writes b to out and flushes out when it can, and reports whether all of b went through.
+func (l *lineWriter) pass(b []byte) (int, bool, error) {
+	n, err := l.out.Write(b)
+	if err == nil && n < len(b) {
+		err = io.ErrShortWrite
+	}
+	if f, ok := l.out.(interface{ Flush() error }); ok && err == nil {
+		err = f.Flush()
+	}
+	return n, err == nil, err
+}
+
 func (l *lineWriter) Write(b []byte) (int, error) {
 	p := l.p
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if len(b) == 0 {
 		return l.out.Write(b)
 	}
-	if p.stopped {
-		n, err := l.out.Write(b)
-		p.track(b[:min(max(n, 0), len(b))])
-		p.payCursor()
+	p.mu.Lock()
+	if p.dead {
+		p.mu.Unlock()
+		n, _, err := l.pass(b)
 		return n, err
 	}
-	// The width check may disable the art and show the cursor, so it waits while the output ends
-	// inside a rune; nothing is drawn then anyway, since the line is unfinished.
-	if !p.midRune && p.fits() {
-		p.clear()
-	}
-	n, err := l.out.Write(b)
-	// Only the bytes that were written count: after a short or failed write the line on the screen is
-	// whatever reached it.
-	p.track(b[:min(max(n, 0), len(b))])
-	if f, ok := l.out.(interface{ Flush() error }); ok && n > 0 {
-		if ferr := f.Flush(); ferr != nil {
-			// Some of the bytes may still be held: treat the line as unfinished.
-			p.held = true
-			if err == nil {
-				err = ferr
-			}
+	nested := p.busy
+	if nested {
+		p.overlap = true
+	} else {
+		p.busy, p.overlap = true, false
+		// While the output ends inside a rune no frame is on the screen, since the line is unfinished.
+		if !p.stopped && !p.midRune && p.fits() {
+			p.clear()
 		}
 	}
-	if !p.held && err == nil && p.fits() {
+	p.mu.Unlock()
+
+	n, ok, err := l.pass(b)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !ok {
+		p.dead, p.drawn = true, false
+	} else {
+		p.track(b)
+	}
+	if nested {
+		// The writer that was busy finishes later and decides; the line counts as unfinished.
+		p.held = true
+		return n, err
+	}
+	p.busy = false
+	if p.overlap {
+		p.held = true
+	}
+	if ok {
+		p.fits() // checked after every wrapped write, line break or not
 		p.draw()
 	}
-	p.payCursor()
+	p.sendShow()
 	return n, err
 }
 
-// track records the output bytes that reached the terminal: whether they leave a line unfinished, and
+// track records output bytes that reached the terminal: whether they leave a line unfinished, and
 // whether they end inside a UTF-8 sequence. The caller holds p.mu.
 func (p *Player) track(b []byte) {
 	if len(b) == 0 {
@@ -346,60 +380,38 @@ func (p *Player) track(b []byte) {
 	}
 	p.held = b[len(b)-1] != '\n'
 	const keep = utf8.UTFMax - 1
-	if len(b) >= keep {
-		p.tail = append(p.tail[:0], b[len(b)-keep:]...)
-	} else {
-		p.tail = append(p.tail, b...)
-		if len(p.tail) > keep {
-			p.tail = append(p.tail[:0], p.tail[len(p.tail)-keep:]...)
-		}
-	}
+	p.tail = append(p.tail, b[max(0, len(b)-keep):]...)
+	p.tail = p.tail[max(0, len(p.tail)-keep):]
 	p.midRune = openRune(p.tail)
 }
 
-// openRune reports whether b ends inside a UTF-8 sequence: a lead byte whose continuation bytes have
-// not all arrived. Only the last three bytes matter.
+// openRune reports whether b ends inside a UTF-8 sequence: the last byte that can start a rune is a
+// valid lead byte whose continuation bytes have not all arrived. A byte that starts no valid sequence,
+// such as 0xff, leaves nothing open.
 func openRune(b []byte) bool {
 	for i := len(b) - 1; i >= 0 && i >= len(b)-(utf8.UTFMax-1); i-- {
-		c := b[i]
-		switch {
-		case c < 0x80:
-			return false
-		case c >= 0xf0:
-			return len(b)-i < 4
-		case c >= 0xe0:
-			return len(b)-i < 3
-		case c >= 0xc0:
-			return len(b)-i < 2
+		if utf8.RuneStart(b[i]) {
+			return !utf8.FullRune(b[i:])
 		}
-		// A continuation byte: look further back for its lead byte.
 	}
 	return false
 }
 
-// fits checks the terminal width again before a frame is cleared or drawn. When a frame no longer
-// fits, or the writer is no longer a terminal, it turns the art off. The caller holds p.mu.
+// fits checks the terminal width again before a frame is cleared or drawn and after each write that
+// could change it. When a frame no longer fits, or the writer is no longer a terminal, it turns the
+// frames off and asks for the cursor show. The caller holds p.mu.
 func (p *Player) fits() bool {
-	if p.disabled {
+	if p.off || p.dead || p.stopped {
 		return false
 	}
 	if cols, ok := p.terminal(p.w); ok && fitsWidth(cols) {
 		return true
 	}
-	p.disable()
+	// The frame on the screen may have wrapped or been cut short, so the cursor-up count for clearing
+	// it can no longer be trusted: nothing is cleared.
+	p.off, p.drawn = true, false
+	p.askShow()
 	return false
-}
-
-// disable stops all drawing. The frame on the screen may have wrapped or been cut short, so the
-// cursor-up count for clearing it can no longer be trusted: nothing is cleared. The cursor is shown
-// again at once. The caller holds p.mu.
-func (p *Player) disable() {
-	if p.disabled {
-		return
-	}
-	p.disabled = true
-	p.drawn = false
-	p.restoreCursor()
 }
 
 // clearSeq moves the cursor to the first line of a frame of n lines and erases to the end of the screen.
@@ -409,36 +421,38 @@ func clearSeq(n int) string {
 
 // clear removes the frame from the screen. The caller holds p.mu.
 func (p *Player) clear() {
-	if !p.drawn || p.disabled {
-		return
-	}
-	if !p.write(clearSeq(p.lines)) {
+	if !p.drawn {
 		return
 	}
 	p.drawn = false
+	p.write(clearSeq(p.lines))
 }
 
 // draw writes the current frame from the cursor down and leaves the cursor at the start of the line
-// below it. The caller holds p.mu.
+// below it. The width and the context are checked once more after the frame is rendered, just before
+// it is written; a write already under way cannot be called back. The caller holds p.mu.
 func (p *Player) draw() {
-	if p.stopped || p.held || p.disabled || p.ctx.Err() != nil {
+	if p.stopped || p.held || p.busy || p.off || p.dead || p.ctx.Err() != nil {
 		return
 	}
 	s := "\r" + render(&p.scene, &p.style, p.idx, p.status).ansi(p.truecolor)
-	// A frame that did not reach the screen whole is never cleared: the cursor-up move would erase
-	// lines above it.
+	if !p.fits() || p.ctx.Err() != nil {
+		return
+	}
+	// A frame that did not reach the screen whole is never cleared: the player is inert after it.
 	p.drawn = p.write(s)
 }
 
-// write sends s to the terminal and reports whether all of it arrived. After a short or failed write
-// the art is turned off, since the failure only loses the art. The caller holds p.mu.
+// write sends s to the terminal and reports whether all of it arrived. After a failed or short write
+// the player goes inert for good: it writes nothing to the terminal again, not even the cursor show,
+// and retries nothing. The caller holds p.mu.
 func (p *Player) write(s string) bool {
-	if p.disabled {
+	if p.dead {
 		return false
 	}
 	n, err := io.WriteString(p.w, s)
 	if err != nil || n < len(s) {
-		p.disable()
+		p.dead, p.drawn = true, false
 		return false
 	}
 	return true

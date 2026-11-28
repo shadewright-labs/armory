@@ -20,17 +20,35 @@
 // frame is cleared, and once the output ends a line the frame is drawn again below it. While a line is
 // unfinished no frame is drawn, so no frame byte lands inside a line of output, and while the output
 // ends inside a UTF-8 sequence the player writes nothing at all. Start is called once the output so far
-// ends a line, since the first frame is drawn from the start of the cursor's line. A writer passed to
-// Wrap passes each write on before it returns, or has a Flush() error method that Wrap calls.
+// ends a line, since the first frame is drawn from the start of the cursor's line; Start does not check
+// this. A writer passed to Wrap passes each write on before it returns, or has a Flush() error method
+// that Wrap calls. The player's lock is not held while such a writer is written or flushed, so it may
+// write back through the same player; a wrapped write that overlaps another, nested or from another
+// goroutine, passes straight through and holds the frames until a wrapped write that runs alone ends a
+// line.
 //
-// Every terminal write happens under one lock, so a terminal whose writes block (a pipe nobody reads)
-// blocks Stop, [Player.SetStatus] and writes through Wrap until the write returns. The package starts
-// no goroutine per write to get around that.
+// One rule covers failed writes: after any write or flush error, or a short write, on the terminal or
+// on a writer passed to Wrap, the player goes inert for good. It draws no frame, clears nothing, sends
+// no cursor sequence and retries nothing; the caller's own bytes still pass through Wrap as given. The
+// cost is that a failed write can leave the cursor hidden, or part of a frame on the screen. Only the
+// normal path ends with a clean clear and cursor show.
+//
+// The width is checked again before each clear and each frame, after the cursor hide and each clear,
+// and after every write through Wrap, with or without a line break. When the terminal narrows
+// below [Width] columns or stops being a terminal, the player draws no more frames, does not clear the
+// last one (the cursor-up count may no longer hold) and shows the cursor. The context is checked again
+// after a frame is rendered, just before it is written, but a write already under way cannot be called
+// back.
+//
+// Every terminal write of the player happens under one lock, so a terminal whose writes block (a pipe
+// nobody reads) blocks Stop and [Player.SetStatus] until the write returns. The package starts no
+// goroutine per write to get around that.
 //
 // The player stops, clears the frame and shows the cursor again when [Player.Stop] is called or the
 // context passed to Start ends. To restore the terminal on Ctrl-C, pass a context from
 // [os/signal.NotifyContext]: the interrupt cancels it and the player cleans up before the command
-// returns.
+// returns. When the output ends inside a UTF-8 sequence at that point, the cursor show waits for the
+// wrapped write that completes it, and the cursor stays hidden if that write never comes.
 //
 // The status line is caller text drawn on a terminal, so it is cleaned before it is drawn: line breaks
 // and tabs become spaces, control characters, escape sequences, zero-width marks and runes that are not
@@ -43,8 +61,14 @@
 //
 // Frame text has a stricter rule: [Scene.Validate] accepts only runes from that table, so a scene that
 // would corrupt the screen is refused instead of drawn. Frames may use ambiguous runes such as box
-// drawing and block elements, counted as one column each; a terminal set to draw ambiguous runes two
-// columns wide draws such a frame wider than [Width], and its redraw leaves stale art.
+// drawing and block elements, counted as one column each. This is a known limit: a terminal set to draw
+// ambiguous runes two columns wide draws such a row wider than [Width] (the built-in "relay" and "wave"
+// scenes reach 104 columns there), the row wraps, and each redraw leaves stale art above the frame. On
+// such a terminal, turn the art off with [Config.Off].
+//
+// The locale check is a mitigation, not a test of the terminal. With no locale set, or with a UTF-8
+// locale on a terminal that reads 8-bit controls, a status rune such as U+00DB still reaches the
+// terminal as UTF-8 bytes, and its second byte (0x9b) can be read as a control sequence.
 //
 // The package does not log, reads no file and makes no network call.
 package waitart
