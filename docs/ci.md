@@ -48,6 +48,7 @@ The checks that block a merge are a repository setting, the branch ruleset for m
 | `vulncheck.yml` | Mondays, by hand | govulncheck |
 | `codeql.yml` | Mondays, pushes to main, by hand | CodeQL for Go and workflows |
 | `scorecard.yml` | Mondays, pushes to main, branch protection changes, by hand | OpenSSF Scorecard, results to the Security tab and the README badge |
+| `iana-registries.yml` | Wednesdays, by hand | downloads the three IANA registries the `netguard` table follows (each at most 256 KiB) and compares them with the copies pinned under `netguard/testdata/iana`; a difference fails the `compare` job (`contents: read`) and the `report` job (`issues: write` only) opens one issue per changed registry with the changed rows in a fenced block, or comments on the open issue for that registry. It is the only job with network access to a source outside GitHub, and the package itself makes none |
 | `fuzz.yml` | Tuesdays, by hand | one job per fuzz target that `hack/fuzz-targets.sh` lists, four minutes each; the corpus grows in the Actions cache from week to week, and a failing input is uploaded as an artifact |
 
 `hack/fuzz-targets.sh` takes its list from `go test -list '^Fuzz' ./...`, so a new target in any package is fuzzed without being listed anywhere, and it fails when `go test` fails or finds no target. `hack/fuzz-failures.sh` collects the untracked files under `testdata/fuzz/` that a failing run leaves. Their tests are `hack/test/fuzz-targets_test.sh`.
