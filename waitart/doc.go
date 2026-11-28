@@ -27,25 +27,35 @@
 // flush of the wrapped writer to the redraw. The player's own drawing never runs between the caller's
 // bytes, and writes through Wrap, from any goroutine and through any writer of the same player, run one
 // at a time. A writer passed to Wrap passes each write on before it returns, or has a Flush() error
-// method that Wrap calls. A buffered writer passed to Wrap starts empty and is written only through
-// the wrapper, since bytes it already held would be flushed while a frame is on the screen.
+// method that Wrap calls. A buffered writer passed to Wrap starts empty and is used only through the
+// wrapper: while the player may use it, the caller does not write, flush or inspect it (such as with
+// Buffered) directly. Bytes it already held would be flushed while a frame is on the screen, and a
+// direct call would race with a wrapped write.
 //
 // The player does not support re-entry. A writer passed to Start or Wrap, and the [Config.Terminal]
 // callback, must not call back into the same player while the player runs them, from any goroutine:
 // no write through a writer of that player's Wrap, no [Player.Stop] and no [Player.SetStatus], and no
 // waiting on another goroutine that makes such a call. The call would wait on the lock that write
-// holds, and may deadlock. The one case the package catches is static: Wrap given a writer it made for
-// the same player, as in p.Wrap(p.Wrap(term)), returns a writer whose every write fails with
+// holds, and may deadlock. Calls across players can deadlock the same way: a writer or Terminal
+// callback of one player must not call into another player whose writers or callback may call back
+// into the first, since two such calls at once each hold one lock and wait for the other. The one case
+// the package catches is static: Wrap given a writer it made for the same player, as in
+// p.Wrap(p.Wrap(term)) or p.Wrap(p.Wrap(p.Wrap(term))), returns a writer whose every write fails with
 // [ErrNestedWrap], writes nothing and has no effect on the player. Nesting through another writer, as
 // in p.Wrap(bufio.NewWriter(p.Wrap(term))), is not detected.
 //
+// The player's lock serializes the Terminal callback only against the running player's own checks.
+// [Config.Enabled], which Start also calls, runs the callback outside any lock, so a callback that
+// keeps state of its own guards that state itself.
+//
 // The writer given to Start must deliver each write before it returns: the player never flushes it, so
 // a buffered writer could hold a frame or the cursor show after Stop has returned. The player tracks
-// UTF-8 boundaries, not escape sequences, so a caller must not leave a terminal escape sequence open
-// across writes (such as "\x1b[31" in one write and "m" in the next) while Stop can run, the context
-// can end or the terminal can narrow: the cursor show would land inside it. That includes the cleanup a
-// width check starts, such as the check after each wrapped write, which can send the cursor show
-// before the caller's next write.
+// UTF-8 boundaries, not escape sequences, so a caller keeps each terminal escape sequence within one
+// wrapped write, never open across writes (such as "\x1b[31" in one write and "m" in the next): the
+// player's own bytes could land inside it. Stop and the end of the context send the cursor show, and so
+// can any check after a wrapped write that finds the terminal gone or narrowed, including a Terminal
+// callback that returns ok=false. A line break inside an open sequence also lets the player redraw the
+// frame after that write.
 //
 // One rule covers failed writes: after any write or flush error, or a short write, on the terminal or
 // on a writer passed to Wrap (a zero-length write included), and after such a writer panics, the
@@ -59,8 +69,10 @@
 // The width is checked at these points: in Enabled, before the first frame; before each frame is
 // written, after it is rendered (so after the cursor hide at start and after the clear of each redraw);
 // before a frame is cleared, at each frame tick while no partial line is on the screen, at the start of
-// each non-empty wrapped write and in Stop; and after each non-empty wrapped write that succeeds, with
-// or without a line break. It is not checked after a frame is written, nor between the clear at the
+// each non-empty wrapped write and in Stop while a frame is on the screen; and after each non-empty
+// wrapped write that succeeds, with or without a line break. A zero-length wrapped write checks
+// nothing, and Stop with no frame on the screen does not ask for the width (it still shows the cursor).
+// It is not checked after a frame is written, nor between the clear at the
 // start of a wrapped write and the end of that write: a terminal that narrows then is seen at the next
 // check, and until then the cursor stays hidden. Frame ticks check the width only while no partial
 // output line is on the screen; with a partial line there, a narrowing is seen at the next wrapped

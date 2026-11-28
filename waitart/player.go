@@ -36,8 +36,9 @@ type Config struct {
 	// called again before each frame, so a terminal that narrows or goes away stops the drawing. When
 	// nil, w counts as a terminal when it is an *os.File on a character device, with its width taken
 	// from COLUMNS when that is set, and unknown otherwise.
-	// It runs under the player's lock, so it must not call back into the same player (Stop,
-	// SetStatus or a write through Wrap), from any goroutine.
+	// The running player calls it under its lock, so it must not call back into the same player (Stop,
+	// SetStatus or a write through Wrap), from any goroutine. [Config.Enabled] calls it outside any
+	// lock, so the lock serializes only the running player's own checks.
 	Terminal func(w io.Writer) (cols int, ok bool)
 	// Style sets the status line colours; nil uses [DefaultStyle].
 	Style *Style
@@ -215,15 +216,21 @@ func (p *Player) run(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		p.lock()
-		if !p.stopped && ctx.Err() == nil {
-			p.idx++
-			if !p.held && p.fits() {
-				p.clear()
-				p.draw() // checks the width again, after the clear
-			}
+		p.tick(ctx)
+	}
+}
+
+// tick draws the next frame. The lock is given up in a defer, so a terminal writer that panics or a
+// [Config.Terminal] callback that ends its goroutine, as runtime.Goexit does, cannot keep it.
+func (p *Player) tick(ctx context.Context) {
+	p.lock()
+	defer p.unlock()
+	if !p.stopped && ctx.Err() == nil {
+		p.idx++
+		if !p.held && p.fits() {
+			p.clear()
+			p.draw() // checks the width again, after the clear
 		}
-		p.unlock()
 	}
 }
 
@@ -337,7 +344,8 @@ func (p *Player) SetStatus(status string) {
 // effect on the player. Nesting through another writer, as in p.Wrap(bufio.NewWriter(p.Wrap(term))),
 // is not detected.
 //
-// A buffered out must start empty and be written only through the wrapper: bytes it already holds
+// A buffered out must start empty and be used only through the wrapper, never written, flushed or
+// inspected directly while the player may use it: bytes it already holds
 // would be flushed by the first wrapped write while a frame is on the screen, and the player would not
 // know about them.
 //
@@ -353,14 +361,22 @@ func (p *Player) Wrap(out io.Writer) io.Writer {
 	if p == nil {
 		return out
 	}
-	if l, ok := out.(*lineWriter); ok && l.p == p {
-		return refused{}
+	switch w := out.(type) {
+	case *lineWriter:
+		if w.p == p {
+			return refused{p: p}
+		}
+	case refused:
+		if w.p == p {
+			return w
+		}
 	}
 	return &lineWriter{p: p, out: out}
 }
 
-// refused is the writer Wrap returns for a writer of the same player.
-type refused struct{}
+// refused is the writer Wrap returns for a writer of the same player. It keeps the player, so wrapping
+// it again in the same player is refused too, at any depth.
+type refused struct{ p *Player }
 
 func (refused) Write([]byte) (int, error) { return 0, ErrNestedWrap }
 

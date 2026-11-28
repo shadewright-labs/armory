@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -632,4 +633,50 @@ func TestStopAfterEmptyWriteClearsFrame(t *testing.T) {
 	if got := term.String()[mark:]; got != want {
 		t.Fatalf("Stop after an empty write wrote %q, want %q", got, want)
 	}
+}
+
+// TestDeepNestedWrapIsRefused wraps a refused writer again, as in p.Wrap(p.Wrap(p.Wrap(term))). The
+// outer Wrap must refuse it too: the write fails with ErrNestedWrap, reaches no writer and leaves the
+// frame on the screen, so Stop writes exactly the clear and the cursor show.
+func TestDeepNestedWrapIsRefused(t *testing.T) {
+	var term fakeTerm
+	p := onTerminal(nil).Start(t.Context(), &term, still(t, "relay"), "Waiting")
+	mark := len(term.String())
+	within(t, "deep nested wrap", func() {
+		out := p.Wrap(p.Wrap(p.Wrap(&term)))
+		if n, err := io.WriteString(out, "line\n"); n != 0 || !errors.Is(err, ErrNestedWrap) {
+			t.Errorf("write: got %d, %v, want 0, ErrNestedWrap", n, err)
+		}
+		p.Stop()
+	})
+	want := clearSeq(scene(t, "relay").Height()) + showCursor
+	if got := term.String()[mark:]; got != want {
+		t.Fatalf("Stop after a deep nested write wrote %q, want %q", got, want)
+	}
+}
+
+// TestGoexitInTerminalReleasesLock makes the Terminal callback call runtime.Goexit during a frame
+// tick. The frame loop's goroutine ends, and Stop must still return: the tick gives up the lock.
+func TestGoexitInTerminalReleasesLock(t *testing.T) {
+	var armed atomic.Bool
+	fired := make(chan struct{})
+	cfg := Config{
+		LookupEnv: env(nil),
+		Terminal: func(io.Writer) (int, bool) {
+			if armed.CompareAndSwap(true, false) {
+				close(fired)
+				runtime.Goexit()
+			}
+			return 80, true
+		},
+	}
+	var term fakeTerm
+	p := cfg.Start(t.Context(), &term, fast(t, "relay"), "Waiting")
+	armed.Store(true)
+	select {
+	case <-fired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no frame tick called Terminal")
+	}
+	within(t, "Stop after Goexit in Terminal", p.Stop)
 }
