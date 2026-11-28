@@ -329,26 +329,196 @@ func TestInvalidByteDoesNotHoldCursor(t *testing.T) {
 	}
 }
 
-// TestNestedWrapDoesNotDeadlock wraps a buffered writer that itself writes through the same player.
-func TestNestedWrapDoesNotDeadlock(t *testing.T) {
-	var term fakeTerm
-	p := onTerminal(nil).Start(t.Context(), &term, still(t, "relay"), "Waiting")
+// within fails the test when f does not return within five seconds, the sign of a deadlock.
+func within(t *testing.T, what string, f func()) {
+	t.Helper()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		out := p.Wrap(bufio.NewWriter(p.Wrap(&term)))
-		_, _ = io.WriteString(out, "line one\n")
-		_, _ = io.WriteString(out, "line two\n")
-		p.Stop()
+		f()
 	}()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("nested wrapped writers deadlocked")
+		t.Fatalf("%s: deadlocked", what)
 	}
+}
+
+// TestNestedWrapIsRefused wraps a writer that itself writes through the same player, directly or
+// through a buffer. The nested write must fail with ErrNestedWrap, without a deadlock, and the player
+// must write nothing more once a nested write was refused, so no cursor show can land inside a rune
+// split across nested writes.
+func TestNestedWrapIsRefused(t *testing.T) {
+	cases := map[string]func(p *Player, term io.Writer) io.Writer{
+		"direct":   func(p *Player, term io.Writer) io.Writer { return p.Wrap(p.Wrap(term)) },
+		"buffered": func(p *Player, term io.Writer) io.Writer { return p.Wrap(bufio.NewWriter(p.Wrap(term))) },
+	}
+	for name, nest := range cases {
+		t.Run(name, func(t *testing.T) {
+			var term fakeTerm
+			p := onTerminal(nil).Start(t.Context(), &term, still(t, "relay"), "Waiting")
+			mark := len(term.String())
+			within(t, name, func() {
+				out := nest(p, &term)
+				for _, part := range []string{"line one\n", "\xe2", "\x82"} {
+					if _, err := io.WriteString(out, part); !errors.Is(err, ErrNestedWrap) {
+						t.Errorf("write %q: got error %v, want ErrNestedWrap", part, err)
+					}
+				}
+				p.Stop()
+				_, _ = io.WriteString(out, "\xac\n")
+			})
+			after := term.String()[mark:]
+			for _, b := range []string{"line one", "\xe2", "\xac"} {
+				if strings.Contains(after, b) {
+					t.Fatalf("refused bytes %q reached the terminal: %q", b, after)
+				}
+			}
+			// The first outer write clears the frame before its writer is called; nothing may follow.
+			if rest := strings.TrimPrefix(after, clearSeq(scene(t, "relay").Height())); name == "buffered" && rest != "" {
+				t.Fatalf("the player wrote after a refused nested write: %q", rest)
+			}
+		})
+	}
+}
+
+// gateWriter blocks the first write that contains hold until gate is closed, and records the most
+// writes it was ever in at once.
+type gateWriter struct {
+	fakeTerm
+	hold    string
+	entered chan struct{}
+	gate    chan struct{}
+	once    sync.Once
+	in      atomic.Int64
+	most    atomic.Int64
+}
+
+func (g *gateWriter) Write(b []byte) (int, error) {
+	n := g.in.Add(1)
+	defer g.in.Add(-1)
+	for {
+		m := g.most.Load()
+		if n <= m || g.most.CompareAndSwap(m, n) {
+			break
+		}
+	}
+	if strings.Contains(string(b), g.hold) {
+		g.once.Do(func() { close(g.entered) })
+		<-g.gate
+	}
+	return g.fakeTerm.Write(b)
+}
+
+// TestWrappedWritesNeverOverlap blocks one wrapped write inside its writer while another goroutine
+// writes through a second wrapped writer, a third calls Stop and frames are due. Nothing may reach the
+// terminal until the blocked write returns: no caller bytes, no frame, no clear, no cursor show.
+func TestWrappedWritesNeverOverlap(t *testing.T) {
+	g := &gateWriter{hold: "first", entered: make(chan struct{}), gate: make(chan struct{})}
+	p := onTerminal(nil).Start(t.Context(), g, fast(t, "relay"), "Waiting")
+	var wg sync.WaitGroup
+	wg.Go(func() { _, _ = io.WriteString(p.Wrap(g), "first\n") })
+	<-g.entered
+	mark := len(g.String())
+	wg.Go(func() { _, _ = io.WriteString(p.Wrap(g), "second\n") })
+	wg.Go(p.Stop)
+	time.Sleep(50 * time.Millisecond)
+	during := g.String()[mark:]
+	close(g.gate)
+	within(t, "writes after the gate", wg.Wait)
+	if during != "" {
+		t.Fatalf("bytes reached the terminal while a wrapped write was in progress: %q", during)
+	}
+	if m := g.most.Load(); m != 1 {
+		t.Fatalf("%d writes were in the writer at once, want 1", m)
+	}
+}
+
+// TestConcurrentWritesThroughSharedBuffer writes lines from several goroutines through one wrapped
+// buffered writer, which is not safe for concurrent use on its own. Each write must reach the terminal
+// whole and once, with frames drawn in between.
+func TestConcurrentWritesThroughSharedBuffer(t *testing.T) {
+	var term fakeTerm
+	p := onTerminal(nil).Start(t.Context(), &term, fast(t, "relay"), "Waiting")
+	out := p.Wrap(bufio.NewWriterSize(&term, 16))
+	const workers, lines = 8, 40
+	var wg sync.WaitGroup
+	for g := range workers {
+		wg.Go(func() {
+			for i := range lines {
+				_, _ = fmt.Fprintf(out, "line %02d-%03d\n", g, i)
+			}
+		})
+	}
+	within(t, "concurrent writes", wg.Wait)
+	p.Stop()
 	got := term.String()
-	if !strings.Contains(got, "line one\nline two\n") || !strings.HasSuffix(got, showOnly) {
-		t.Fatalf("nested output lost or cursor not shown: %q", got)
+	for g := range workers {
+		for i := range lines {
+			if n := strings.Count(got, fmt.Sprintf("line %02d-%03d\n", g, i)); n != 1 {
+				t.Fatalf("line %02d-%03d reached the terminal %d times", g, i, n)
+			}
+		}
+	}
+}
+
+// failEmpty fails every zero-length write and passes the rest.
+type failEmpty struct{ w io.Writer }
+
+func (f failEmpty) Write(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, errors.New("terminal went away")
+	}
+	return f.w.Write(b)
+}
+
+// TestFailedEmptyWriteGoesInert fails a zero-length wrapped write: the player must go inert like after
+// any other failed write, so Stop writes nothing.
+func TestFailedEmptyWriteGoesInert(t *testing.T) {
+	var term fakeTerm
+	p := onTerminal(nil).Start(t.Context(), &term, still(t, "relay"), "Waiting")
+	if _, err := p.Wrap(failEmpty{&term}).Write(nil); err == nil {
+		t.Fatal("the failed empty write was not reported")
+	}
+	mark := len(term.String())
+	p.Stop()
+	if after := term.String()[mark:]; after != "" {
+		t.Fatalf("the player wrote after a failed empty write: %q", after)
+	}
+}
+
+// callsBack runs f during its first write, then writes through.
+type callsBack struct {
+	w    io.Writer
+	once sync.Once
+	f    func()
+}
+
+func (c *callsBack) Write(b []byte) (int, error) {
+	c.once.Do(c.f)
+	return c.w.Write(b)
+}
+
+// TestPlayerCallsFromInsideWrappedWrite calls SetStatus and Stop from inside a writer passed to Wrap,
+// while the player's lock is held for that write: neither may deadlock, and the cursor show follows
+// the caller's bytes.
+func TestPlayerCallsFromInsideWrappedWrite(t *testing.T) {
+	var term fakeTerm
+	p := onTerminal(nil).Start(t.Context(), &term, still(t, "relay"), "Waiting")
+	out := &callsBack{w: &term, f: func() {
+		p.SetStatus("Changed")
+		p.Stop()
+	}}
+	within(t, "calls from inside a wrapped write", func() {
+		_, _ = io.WriteString(p.Wrap(out), "line\n")
+		p.Stop()
+	})
+	got := term.String()
+	if !strings.HasSuffix(got, "line\n"+showCursor) {
+		t.Fatalf("the cursor show did not follow the caller's bytes: %q", got[max(0, len(got)-30):])
+	}
+	if strings.Contains(got, "Changed") {
+		t.Fatalf("a frame was drawn after Stop: %q", got)
 	}
 }
 
@@ -429,5 +599,20 @@ func TestCancelJustBeforeFrameWrite(t *testing.T) {
 	p.Stop()
 	if got := term.String(); strings.Contains(got, "Waiting") {
 		t.Fatalf("a frame was written after the context ended: %q", got)
+	}
+}
+
+// TestGoid checks that goid reads a goroutine number, different in another goroutine: the nested-write
+// refusal depends on it.
+func TestGoid(t *testing.T) {
+	here := goid()
+	other := make(chan uint64)
+	go func() { other <- goid() }()
+	there := <-other
+	if here == 0 || there == 0 || here == there {
+		t.Fatalf("goid: here %d, other goroutine %d", here, there)
+	}
+	if goid() != here {
+		t.Fatal("goid changed within one goroutine")
 	}
 }

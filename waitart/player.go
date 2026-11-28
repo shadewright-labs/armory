@@ -1,15 +1,25 @@
 package waitart
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
+
+// ErrNestedWrap is the error of a write through a writer of [Player.Wrap] that the same player would
+// have to make while it already makes another: a writer wrapped twice by one player, such as
+// p.Wrap(p.Wrap(term)) or p.Wrap(bufio.NewWriter(p.Wrap(term))). The player refuses such a write
+// instead of waiting on its own lock.
+var ErrNestedWrap = errors.New("waitart: nested write through the same player")
 
 const (
 	hideCursor = "\x1b[?25l"
@@ -78,7 +88,8 @@ func (c *Config) terminal() func(io.Writer) (int, bool) {
 func fitsWidth(cols int) bool { return cols == 0 || cols >= Width }
 
 // utf8Locale reports whether the locale uses UTF-8: the first of LC_ALL, LC_CTYPE and LANG that is set
-// and not empty names UTF-8, or none is set.
+// and not empty contains "utf-8" or "utf8" in any case, or none is set. It is a substring match and
+// does not parse the locale.
 func (c *Config) utf8Locale() bool {
 	for _, name := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
 		if v := strings.ToLower(c.env(name)); v != "" {
@@ -93,9 +104,10 @@ func (c *Config) utf8Locale() bool {
 // at least [Width] columns wide or of unknown width.
 //
 // The locale is the first of LC_ALL, LC_CTYPE and LANG that is set and not empty. A locale that does
-// not name UTF-8, such as C, POSIX or en_US.ISO-8859-1, turns the art off: a terminal that reads 8-bit
-// controls would take bytes inside the UTF-8 encoding of a rune such as U+00DB for a control sequence.
-// With no locale set the terminal is taken to be UTF-8.
+// not contain "utf-8" or "utf8" in any case, such as C, POSIX or en_US.ISO-8859-1, turns the art off:
+// a terminal that reads 8-bit controls would take bytes inside the UTF-8 encoding of a rune such as
+// U+00DB for a control sequence. With no locale set the terminal is taken to be UTF-8. The check is a
+// substring match and a mitigation only (see the package documentation).
 func (c Config) Enabled(w io.Writer) bool {
 	if c.Off || c.LookupEnv == nil || w == nil {
 		return false
@@ -123,9 +135,8 @@ type Player struct {
 	held      bool   // a partial output line is on the screen; draw nothing
 	tail      []byte // the last bytes of output, to tell whether it ends inside a rune
 	midRune   bool   // the output ends inside a UTF-8 sequence; write nothing to the terminal
-	busy      bool   // a wrapped write is with its writer, without the lock
-	overlap   bool   // another wrapped write ran while busy, so the order on the screen is unknown
 	stopped   bool
+	quitDone  bool // quit is closed
 	off       bool // the terminal narrowed or went away: no more frames
 	dead      bool // a write failed or came up short: write nothing to the terminal again
 	showAsked bool // the cursor show was asked for
@@ -133,7 +144,11 @@ type Player struct {
 	terminal  func(io.Writer) (int, bool)
 	ctx       context.Context
 
-	once sync.Once
+	// owner is the goroutine that holds mu, or 0. It lets a call made by that goroutine from inside a
+	// write or callback the player runs under mu (a nested wrapped write, Stop, SetStatus) see that it
+	// already holds the lock, instead of waiting on it for ever.
+	owner atomic.Uint64
+
 	quit chan struct{}
 	done chan struct{}
 }
@@ -146,6 +161,9 @@ type Player struct {
 // The first frame is drawn from the start of the line the cursor is on, so call Start once the output
 // so far ends a line: text printed before Start without a line break, such as a prompt, is drawn over.
 // Start does not check this, because the package cannot read the cursor position.
+//
+// The player never flushes w, so w must pass each write on to the terminal before it returns. A
+// buffered w could still hold the cursor show after Stop has returned.
 func (c Config) Start(ctx context.Context, w io.Writer, sc Scene, status string) *Player {
 	if ctx == nil {
 		ctx = context.Background()
@@ -170,10 +188,10 @@ func (c Config) Start(ctx context.Context, w io.Writer, sc Scene, status string)
 		quit:      make(chan struct{}),
 		done:      make(chan struct{}),
 	}
-	p.mu.Lock()
+	p.lock()
 	p.write(hideCursor)
 	p.draw() // checks the width again, after the cursor hide
-	p.mu.Unlock()
+	p.unlock()
 	go p.run(ctx)
 	return p
 }
@@ -181,9 +199,9 @@ func (c Config) Start(ctx context.Context, w io.Writer, sc Scene, status string)
 func (p *Player) run(ctx context.Context) {
 	defer close(p.done)
 	for {
-		p.mu.Lock()
+		p.lock()
 		delay := p.scene.Frames[p.idx%len(p.scene.Frames)].Delay
-		p.mu.Unlock()
+		p.unlock()
 		if delay <= 0 {
 			delay = DefaultDelay
 		}
@@ -198,30 +216,41 @@ func (p *Player) run(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		p.mu.Lock()
-		if !p.stopped && !p.busy && ctx.Err() == nil {
+		p.lock()
+		if !p.stopped && ctx.Err() == nil {
 			p.idx++
 			if !p.held && p.fits() {
 				p.clear()
 				p.draw() // checks the width again, after the clear
 			}
 		}
-		p.mu.Unlock()
+		p.unlock()
 	}
 }
 
 // Stop clears the frame and shows the cursor again. It is safe to call more than once and on a nil
-// Player, and it returns once the player has stopped drawing.
+// Player, and it returns once the player has stopped drawing and its cleanup is written.
 //
-// When output written through [Player.Wrap] ends inside a UTF-8 sequence, the cursor show waits for
-// the wrapped write that completes it, so no byte lands inside a rune; if that write never comes, the
-// cursor stays hidden. After a failed or short write the player is inert (see the package
-// documentation) and Stop writes nothing.
+// Stop waits for the player's lock, so it waits for a write through [Player.Wrap] in progress and for
+// a terminal write of the player in progress. On a writer that blocks, such as a pipe nobody reads,
+// Stop blocks with it, and so does [Player.SetStatus].
 //
-// Stop waits for a terminal write of the player in progress: on a terminal whose writes block, such as
-// a pipe nobody reads, Stop blocks with it, and so does [Player.SetStatus].
+// When output written through Wrap ends inside a UTF-8 sequence, the cursor show waits for the wrapped
+// write that completes it, so no byte lands inside a rune; if that write never comes, the cursor stays
+// hidden. After a failed or short write the player is inert (see the package documentation) and Stop
+// writes nothing.
+//
+// Called from inside a writer passed to Wrap, or from [Config.Terminal], while the player runs it,
+// Stop marks the player stopped and returns at once; the cursor show is written once that write or
+// check returns.
 func (p *Player) Stop() {
 	if p == nil {
+		return
+	}
+	if p.owned() {
+		p.stopped = true
+		p.askShow()
+		p.closeQuit()
 		return
 	}
 	p.stop()
@@ -229,34 +258,41 @@ func (p *Player) Stop() {
 }
 
 func (p *Player) stop() {
-	p.once.Do(func() {
-		p.mu.Lock()
-		// The width is checked first: on a narrowed terminal the cursor-up count no longer holds. While
-		// a wrapped write is busy the frame is already cleared.
-		if p.drawn && !p.busy && p.fits() {
-			p.clear()
-		}
-		p.stopped = true
-		p.askShow()
-		p.mu.Unlock()
-		close(p.quit)
-	})
+	p.lock()
+	defer p.unlock()
+	if p.stopped {
+		return
+	}
+	// The width is checked first: on a narrowed terminal the cursor-up count no longer holds.
+	if p.drawn && p.fits() {
+		p.clear()
+	}
+	p.stopped = true
+	p.askShow()
+	p.closeQuit()
 }
 
-// askShow asks for the cursor show once and sends it if it can go now. The caller holds p.mu.
+// closeQuit ends the frame loop. The caller holds p.mu.
+func (p *Player) closeQuit() {
+	if !p.quitDone {
+		p.quitDone = true
+		close(p.quit)
+	}
+}
+
+// askShow asks for the cursor show once; it is sent when the lock is given up. The caller holds p.mu.
 func (p *Player) askShow() {
 	if !p.showAsked {
 		p.showAsked, p.showDue = true, true
 	}
-	p.sendShow()
 }
 
-// sendShow writes the cursor show that is due, in one write, unless the player is inert, a wrapped
-// write is busy or the output ends inside a rune; then it stays due. While a partial output line is on
-// the screen the colour reset is left out, so the caller's own colour stays. A failed or short show is
-// not sent again. The caller holds p.mu.
+// sendShow writes the cursor show that is due, in one write, unless the player is inert or the output
+// ends inside a rune; then it stays due. While a partial output line is on the screen the colour reset
+// is left out, so the caller's own colour stays. A failed or short show is not sent again. The caller
+// holds p.mu and has finished any write of the caller's bytes.
 func (p *Player) sendShow() {
-	if !p.showDue || p.dead || p.busy || p.midRune {
+	if !p.showDue || p.dead || p.midRune {
 		return
 	}
 	p.showDue = false
@@ -267,15 +303,56 @@ func (p *Player) sendShow() {
 	}
 }
 
+// goid returns the number of the calling goroutine, read from the header line of its stack trace
+// ("goroutine 18 [running]:"), or 0 when that line cannot be read. The standard library has no other
+// way to tell which goroutine holds a lock.
+func goid() uint64 {
+	var buf [64]byte
+	b := bytes.TrimPrefix(buf[:runtime.Stack(buf[:], false)], []byte("goroutine "))
+	i := bytes.IndexByte(b, ' ')
+	if i <= 0 {
+		return 0
+	}
+	id, err := strconv.ParseUint(string(b[:i]), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
+}
+
+// owned reports whether the calling goroutine holds p.mu.
+func (p *Player) owned() bool {
+	id := goid()
+	return id != 0 && p.owner.Load() == id
+}
+
+// lock takes p.mu and records the calling goroutine as its owner.
+func (p *Player) lock() {
+	id := goid()
+	p.mu.Lock()
+	p.owner.Store(id)
+}
+
+// unlock sends a cursor show that is due and gives up p.mu.
+func (p *Player) unlock() {
+	p.sendShow()
+	p.owner.Store(0)
+	p.mu.Unlock()
+}
+
 // SetStatus changes the status line; the next frame shows it. It is safe to call from any goroutine
 // and on a nil Player.
 func (p *Player) SetStatus(status string) {
 	if p == nil {
 		return
 	}
-	p.mu.Lock()
+	if p.owned() {
+		p.status = status
+		return
+	}
+	p.lock()
 	p.status = status
-	p.mu.Unlock()
+	p.unlock()
 }
 
 // Wrap returns a writer for real output that shares the screen with the player: before each write the
@@ -283,18 +360,22 @@ func (p *Player) SetStatus(status string) {
 // never drawn while a line is unfinished, so no frame byte lands inside an output line. After Stop,
 // writes pass straight to out. On a nil Player it returns out.
 //
-// The frame is drawn once out returns, so out must pass each write on to the terminal before it
-// returns. A buffered writer with a Flush() error method, such as a [bufio.Writer], is flushed after
-// each write. Any other buffering writer would let a frame land before bytes it still holds.
+// Each write holds the player's lock from the clear to the redraw, including the write to out and its
+// flush, so the player draws, clears and sends nothing while out is written, and writes through every
+// writer of the same player, from any number of goroutines, run one at a time. out must pass each
+// write on to the terminal before it returns. A buffered writer with a Flush() error method, such as a
+// [bufio.Writer], is flushed after each write. Any other buffering writer would let a frame land before
+// bytes it still holds.
 //
-// When a write to out fails or comes up short, or its flush fails, the player goes inert for good:
-// it draws, clears and sends nothing more, and later writes through Wrap pass straight to out.
+// out must not write through another writer of the same player. Wrap refuses a writer it made for the
+// same player and returns a writer whose every write fails with [ErrNestedWrap]; a nested write it can
+// only see when it happens, as in p.Wrap(bufio.NewWriter(p.Wrap(term))), fails with ErrNestedWrap and
+// makes the player inert.
 //
-// The player's lock is not held while out is written or flushed, so out may itself write through
-// another writer of the same player, as in p.Wrap(bufio.NewWriter(p.Wrap(term))). A wrapped write that
-// arrives while another is with its writer, nested like that or from another goroutine, passes
-// straight through, and the player draws no frame until a later wrapped write that runs alone ends a
-// line. The player does not order writes made through Wrap from several goroutines at once.
+// When a write to out fails or comes up short, or its flush fails, the player goes inert for good: it
+// draws, clears and sends nothing more, and later writes through Wrap pass straight to out, still one
+// at a time. A zero-length write is passed to out and flushed like any other, without a clear or a
+// redraw, and its failure makes the player inert too.
 //
 // Every writer Wrap returns shares one record of whether a line is unfinished, so all output that
 // shares the screen with the player, such as standard output and standard error on the same terminal,
@@ -303,8 +384,16 @@ func (p *Player) Wrap(out io.Writer) io.Writer {
 	if p == nil {
 		return out
 	}
+	if l, ok := out.(*lineWriter); ok && l.p == p {
+		return refused{}
+	}
 	return &lineWriter{p: p, out: out}
 }
+
+// refused is the writer Wrap returns for a writer of the same player.
+type refused struct{}
+
+func (refused) Write([]byte) (int, error) { return 0, ErrNestedWrap }
 
 type lineWriter struct {
 	p   *Player
@@ -325,50 +414,28 @@ func (l *lineWriter) pass(b []byte) (int, bool, error) {
 
 func (l *lineWriter) Write(b []byte) (int, error) {
 	p := l.p
-	if len(b) == 0 {
-		return l.out.Write(b)
+	if p.owned() {
+		// This goroutine already holds the lock, for an outer wrapped write or a callback: the bytes
+		// would land inside that write. The player cannot vouch for the screen any more.
+		p.dead, p.drawn = true, false
+		return 0, ErrNestedWrap
 	}
-	p.mu.Lock()
-	if p.dead {
-		p.mu.Unlock()
-		n, _, err := l.pass(b)
-		return n, err
+	p.lock()
+	defer p.unlock()
+	// While the output ends inside a rune no frame is on the screen, since the line is unfinished.
+	if len(b) > 0 && p.fits() {
+		p.clear()
 	}
-	nested := p.busy
-	if nested {
-		p.overlap = true
-	} else {
-		p.busy, p.overlap = true, false
-		// While the output ends inside a rune no frame is on the screen, since the line is unfinished.
-		if !p.stopped && !p.midRune && p.fits() {
-			p.clear()
-		}
-	}
-	p.mu.Unlock()
-
 	n, ok, err := l.pass(b)
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if !ok {
 		p.dead, p.drawn = true, false
-	} else {
-		p.track(b)
-	}
-	if nested {
-		// The writer that was busy finishes later and decides; the line counts as unfinished.
-		p.held = true
 		return n, err
 	}
-	p.busy = false
-	if p.overlap {
-		p.held = true
-	}
-	if ok {
+	if len(b) > 0 {
+		p.track(b)
 		p.fits() // checked after every wrapped write, line break or not
 		p.draw()
 	}
-	p.sendShow()
 	return n, err
 }
 
@@ -432,11 +499,12 @@ func (p *Player) clear() {
 // below it. The width and the context are checked once more after the frame is rendered, just before
 // it is written; a write already under way cannot be called back. The caller holds p.mu.
 func (p *Player) draw() {
-	if p.stopped || p.held || p.busy || p.off || p.dead || p.ctx.Err() != nil {
+	if p.stopped || p.held || p.off || p.dead || p.ctx.Err() != nil {
 		return
 	}
 	s := "\r" + render(&p.scene, &p.style, p.idx, p.status).ansi(p.truecolor)
-	if !p.fits() || p.ctx.Err() != nil {
+	// The width check calls Config.Terminal, which may have stopped the player.
+	if !p.fits() || p.stopped || p.ctx.Err() != nil {
 		return
 	}
 	// A frame that did not reach the screen whole is never cleared: the player is inert after it.

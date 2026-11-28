@@ -16,8 +16,8 @@ import (
 )
 
 // A command plays a scene on standard error while it waits, and sends its own output through Wrap so
-// the frame never splits a line. The context from signal.NotifyContext ends on Ctrl-C, and the player
-// then clears the frame and shows the cursor before the command returns. When the art is off (not a
+// the frame never splits a line. The context from signal.NotifyContext ends on Ctrl-C, which stops the
+// frames, and the deferred Stop waits until the frame is cleared and the cursor shown again. When the art is off (not a
 // terminal, NO_COLOR, TERM=dumb, the caller's opt-out) Start returns nil and the same code still works.
 func Example() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
