@@ -53,6 +53,7 @@ func ExampleConfig_Enabled() {
 		{"no LookupEnv", waitart.Config{Terminal: term}},
 		{"NO_COLOR=1", waitart.Config{LookupEnv: lookup(map[string]string{"NO_COLOR": "1"}), Terminal: term}},
 		{"TERM=dumb", waitart.Config{LookupEnv: lookup(map[string]string{"TERM": "dumb"}), Terminal: term}},
+		{"LANG=C", waitart.Config{LookupEnv: lookup(map[string]string{"LANG": "C"}), Terminal: term}},
 		{"opt-out", waitart.Config{LookupEnv: lookup(nil), Terminal: term, Off: true}},
 		{"not a terminal", waitart.Config{LookupEnv: lookup(nil)}},
 	} {
@@ -63,6 +64,7 @@ func ExampleConfig_Enabled() {
 	// no LookupEnv: false
 	// NO_COLOR=1: false
 	// TERM=dumb: false
+	// LANG=C: false
 	// opt-out: false
 	// not a terminal: false
 }

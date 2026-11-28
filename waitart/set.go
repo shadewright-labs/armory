@@ -3,7 +3,6 @@ package waitart
 import (
 	"fmt"
 	"math/rand/v2"
-	"slices"
 )
 
 // Kind is the kind of wait a scene is chosen for, such as a build or a wait on a person. A product
@@ -49,26 +48,30 @@ func NewSet(scenes []Scene, kinds map[Kind][]string) (*Set, error) {
 	return s, nil
 }
 
-// Scenes returns the scenes of the set in the order they were given. The slice is a copy; the frames
-// inside it are shared with the set and must not be changed.
+// Scenes returns copies of the scenes of the set in the order they were given; changing them does
+// not change the set.
 func (s *Set) Scenes() []Scene {
-	return slices.Clone(s.scenes)
+	out := make([]Scene, len(s.scenes))
+	for i, sc := range s.scenes {
+		out[i] = sc.clone()
+	}
+	return out
 }
 
-// Lookup returns the scene with the given name.
+// Lookup returns a copy of the scene with the given name; changing it does not change the set.
 func (s *Set) Lookup(name string) (Scene, bool) {
 	for _, sc := range s.scenes {
 		if sc.Name == name {
-			return sc, true
+			return sc.clone(), true
 		}
 	}
 	return Scene{}, false
 }
 
-// ForKind returns a scene that fits the kind of wait, or any scene of the set for a kind with none of
-// its own. src picks among the fitting scenes; with the same source state the choice is the same, so a
-// test passes a seeded source. A nil src picks the first fitting scene. ForKind is safe to call from
-// several goroutines when src is.
+// ForKind returns a copy of a scene that fits the kind of wait, or of any scene of the set for a kind
+// with none of its own; changing it does not change the set. src picks among the fitting scenes; with
+// the same source state the choice is the same, so a test passes a seeded source. A nil src picks the
+// first fitting scene. ForKind is safe to call from several goroutines when src is.
 func (s *Set) ForKind(k Kind, src rand.Source) Scene {
 	fit := s.kinds[k]
 	n := len(fit)
@@ -82,5 +85,5 @@ func (s *Set) ForKind(k Kind, src rand.Source) Scene {
 	if len(fit) > 0 {
 		i = fit[i]
 	}
-	return s.scenes[i]
+	return s.scenes[i].clone()
 }

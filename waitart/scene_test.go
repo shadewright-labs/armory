@@ -251,6 +251,8 @@ func lastLine(cv canvas) string {
 }
 
 // columns counts the terminal columns of a status line by the package rule.
+//
+// Frame rows hold only runes of the narrow table and count one column per rune; see artColumns.
 func columns(s string) int {
 	n := 0
 	for _, r := range s {
@@ -259,6 +261,10 @@ func columns(s string) int {
 	}
 	return n
 }
+
+// artColumns counts the columns of a frame row: one per rune, since frames hold only runes of the
+// narrow table.
+func artColumns(s string) int { return utf8.RuneCountInString(s) }
 
 func TestStatusIsCleanedAndCut(t *testing.T) {
 	sc := scene(t, "relay")
@@ -269,7 +275,7 @@ func TestStatusIsCleanedAndCut(t *testing.T) {
 	if !strings.HasPrefix(last[len("⠋ "):], "Round 2:[2J seat answered ") {
 		t.Fatalf("status text not kept: %q", last)
 	}
-	if n := utf8.RuneCountInString(last); n != Width || !strings.HasSuffix(last, "…") {
+	if n := columns(last); n != Width || !strings.HasSuffix(last, "…") {
 		t.Fatalf("long status not cut to %d columns with an ellipsis: %d %q", Width, n, last)
 	}
 }
@@ -288,8 +294,13 @@ func TestStatusFitsInColumns(t *testing.T) {
 		strings.Repeat("\xff", 60), // invalid UTF-8 draws as U+FFFD, counted as two columns
 	} {
 		cv := render(&sc, &DefaultStyle, 0, status)
-		for line := range strings.SplitSeq(stripSeq(cv.ansi(false)), "\r\n") {
-			if w := columns(line); w > Width {
+		lines := strings.Split(strings.TrimSuffix(stripSeq(cv.ansi(false)), "\r\n"), "\r\n")
+		for i, line := range lines {
+			w := artColumns(line)
+			if i == len(lines)-1 {
+				w = columns(line)
+			}
+			if w > Width {
 				t.Errorf("line is %d columns wide, want at most %d: %q", w, Width, line)
 			}
 			if !utf8.ValidString(line) {
@@ -324,9 +335,16 @@ func TestColumnRule(t *testing.T) {
 			t.Errorf("U+%04X: rune %q, %d columns; want 2", r, out, w)
 		}
 	}
-	// Runes from the narrow table take one column, including the ambiguous ones.
-	for _, r := range []rune{'a', '~', 0xa0, 0xb0, 0xe9, 0x3b1, 0x416, 0x1e9e, 0x2014, 0x2026, 0x20ac,
-		0x2122, 0x2192, 0x2200, 0x2500, 0x2588, 0x25b2, 0x25cf, 0x2800, 0x28ff} {
+	// Runes from the narrow table that are East Asian ambiguous take two columns.
+	for _, r := range []rune{0xa1, 0xb0, 0xe9, 0x142, 0x3b1, 0x416, 0x2014, 0x2026, 0x20ac, 0x2122, 0x2192,
+		0x2200, 0x2500, 0x2588, 0x25b2, 0x25cf, 0x25ef} {
+		if out, w := statusRune(r); w != 2 || out != r {
+			t.Errorf("U+%04X: rune %q, %d columns; want 2", r, out, w)
+		}
+	}
+	// The other runes from the narrow table take one column.
+	for _, r := range []rune{'a', '~', 0xa0, 0xa2, 0xe7, 0x105, 0x17c, 0x3ac, 0x452, 0x1e9e,
+		0x2011, 0x2017, 0x20a4, 0x2101, 0x219a, 0x2201, 0x254c, 0x2590, 0x25ab, 0x25fc, 0x2800, 0x28ff} {
 		if out, w := statusRune(r); w != 1 || out != r {
 			t.Errorf("U+%04X: rune %q, %d columns; want 1", r, out, w)
 		}
@@ -343,12 +361,23 @@ func TestColumnRule(t *testing.T) {
 			t.Errorf("%q: %q, %d; want a space", r, out, w)
 		}
 	}
-	// Every rune frames may hold takes one column in the status line too.
+	// Every rune frames may hold takes one column in the status line too, or two when it is ambiguous.
 	for r := rune(0); r <= 0x2fff; r++ {
 		if artRune(r) {
-			if _, w := statusRune(r); w != 1 {
-				t.Fatalf("U+%04X is allowed in frames but takes %d columns", r, w)
+			want := 1
+			if ambiguous(r) {
+				want = 2
 			}
+			if _, w := statusRune(r); w != want {
+				t.Fatalf("U+%04X is allowed in frames but takes %d columns, want %d", r, w, want)
+			}
+		}
+	}
+	// The ambiguous table lies inside the narrow table and is sorted.
+	for i, rg := range ambiguousRanges {
+		if !inNarrowTable(rg.lo) || !inNarrowTable(rg.hi) || rg.lo > rg.hi ||
+			(i > 0 && ambiguousRanges[i-1].hi >= rg.lo) {
+			t.Fatalf("ambiguous range %d (U+%04X to U+%04X) is out of order or outside the narrow table", i, rg.lo, rg.hi)
 		}
 	}
 }

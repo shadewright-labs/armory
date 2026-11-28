@@ -68,7 +68,7 @@ func render(sc *Scene, st *Style, idx int, status string) canvas {
 }
 
 // statusCells returns the status line: the spinner, a space and the cleaned status text, at most Width
-// cells, one per terminal column, cut with an ellipsis when it is longer.
+// cells, one per terminal column by the status rule, cut with an ellipsis when it is longer.
 func statusCells(st *Style, idx int, status string) []cell {
 	if len(status) > MaxStatusBytes {
 		status = status[:MaxStatusBytes]
@@ -95,14 +95,15 @@ func statusCells(st *Style, idx int, status string) []cell {
 		}
 	}
 	if cut {
-		// Make room for the ellipsis in the last column, removing a two-column rune whole.
-		for len(line) > Width-1 {
+		// Make room for the ellipsis in the last two columns, removing a two-column rune whole. The
+		// ellipsis is East Asian ambiguous, so it counts as two columns like any other such rune.
+		for len(line) > Width-2 {
 			if line[len(line)-1].r == wideTail {
 				line = line[:len(line)-1]
 			}
 			line = line[:len(line)-1]
 		}
-		line = append(line, cell{r: '…', set: true, col: st.Detail})
+		line = append(line, cell{r: '…', set: true, col: st.Detail}, cell{r: wideTail, set: true, col: st.Detail})
 	}
 	return line
 }

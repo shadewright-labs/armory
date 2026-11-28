@@ -25,13 +25,17 @@ func checkDrawn(t *testing.T, cv canvas, wantRows int) {
 		if len(rows) != wantRows {
 			t.Fatalf("drawn frame has %d rows, want %d: %q", len(rows), wantRows, out)
 		}
-		for _, row := range rows {
+		for i, row := range rows {
 			for _, r := range row {
 				if r < 0x20 || (r >= 0x7f && r < 0xa0) {
 					t.Fatalf("control rune U+%04X in a drawn row: %q", r, row)
 				}
 			}
-			if w := columns(row); w > Width {
+			w := artColumns(row)
+			if i == len(rows)-1 {
+				w = columns(row) // the status line, by the status rule
+			}
+			if w > Width {
 				t.Fatalf("drawn row is %d columns wide: %q", w, row)
 			}
 		}
